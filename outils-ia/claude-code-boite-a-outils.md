@@ -111,5 +111,18 @@ omniroute configure claude
 ## Ordre d'installation conseillé
 
 1. **Agent Skills + Ponytail** : colle les deux commandes `/plugin` de chaque section dans Claude Code. Ça prend 1 minute, sans rien à installer sur l'ordi.
+   *Option, activation automatique pour ce dépôt :* crée toi-même le fichier `.claude/settings.json` à la racine avec ce contenu. Claude Code proposera alors d'installer les deux plugins à chaque ouverture du dépôt :
+   ```json
+   {
+     "extraKnownMarketplaces": {
+       "ponytail": { "source": { "source": "github", "repo": "DietrichGebert/ponytail" } },
+       "addy-agent-skills": { "source": { "source": "github", "repo": "addyosmani/agent-skills" } }
+     },
+     "enabledPlugins": {
+       "ponytail@ponytail": true,
+       "agent-skills@addy-agent-skills": true
+     }
+   }
+   ```
 2. **Graphify** : dès qu'il y a une vingtaine de notes, lance `/graphify .`.
 3. **OmniRoute** : seulement si tu arrives souvent au bout de tes quotas Claude, et après avoir lu les précautions ci-dessus.
