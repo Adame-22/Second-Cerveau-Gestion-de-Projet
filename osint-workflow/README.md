@@ -30,7 +30,7 @@ pip install -r requirements.txt
 | `--nom`, `-n` | Nom affiche dans le rapport |
 | `--all-sites` / `--top-sites N` | Etendue de la recherche Maigret (defaut : top 500) |
 | `--skip OUTIL` | Ne pas lancer `holehe`, `sherlock` ou `maigret` |
-| `--timeout`, `--tool-timeout` | Timeout par requete (10 s) et duree maximale par outil (1800 s) |
+| `--timeout`, `--tool-timeout` | Timeout par requete pour Sherlock et Maigret (10 s) et duree maximale par outil (1800 s) |
 
 ## Resultats
 

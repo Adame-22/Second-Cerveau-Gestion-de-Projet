@@ -118,8 +118,8 @@ def run_holehe(email, raw_dir, opts):
     work_dir = raw_dir / f"holehe_{safe_name(email)}"
     work_dir.mkdir(parents=True)
     code, _ = execute(
-        [str(VENV_BIN / "holehe"), email, "--only-used", "--no-color", "--no-clear", "--csv",
-         "--timeout", str(opts.timeout)],
+        # Pas de --timeout : holehe 1.61 le transmet comme chaine a httpx et toutes les requetes echouent.
+        [str(VENV_BIN / "holehe"), email, "--only-used", "--no-color", "--no-clear", "--csv"],
         work_dir / "sortie.log", work_dir, opts.tool_timeout,
     )
     csv_files = list(work_dir.glob("holehe_*_results.csv"))
