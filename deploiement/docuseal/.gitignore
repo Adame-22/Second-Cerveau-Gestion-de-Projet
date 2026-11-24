@@ -1,0 +1,5 @@
+.env
+docuseal/
+pg_data/
+caddy/
+sauvegardes/
