@@ -1,0 +1,43 @@
+# DocuSeal : signature électronique auto-hébergée.
+# Basé sur le docker-compose officiel (github.com/docusealco/docuseal), avec en plus :
+# - redémarrage automatique des services après un redémarrage du serveur ;
+# - mot de passe de la base de données rangé dans .env, pas dans ce fichier ;
+# - l'appli n'est joignable qu'à travers Caddy, en HTTPS (le port 3000 n'est pas ouvert).
+services:
+  app:
+    image: docuseal/docuseal:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./docuseal:/data/docuseal
+    environment:
+      - FORCE_SSL=${HOST:?HOST manquant dans .env}
+      - DATABASE_URL=postgresql://docuseal:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD manquant dans .env}@postgres:5432/docuseal
+
+  postgres:
+    image: postgres:18
+    restart: unless-stopped
+    volumes:
+      - ./pg_data:/var/lib/postgresql/18/docker
+    environment:
+      POSTGRES_USER: docuseal
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: docuseal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U docuseal -d docuseal"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    command: caddy reverse-proxy --from ${HOST} --to app:3000
+    ports:
+      - 80:80
+      - 443:443
+      - 443:443/udp
+    volumes:
+      - ./caddy:/data/caddy

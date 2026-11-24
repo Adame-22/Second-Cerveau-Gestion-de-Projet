@@ -56,7 +56,7 @@ InvoiceShelf n'est pas une plateforme agréée. Pour tes factures entre entrepri
 
 ## Mon avis pour une petite structure
 
-- **Utile tout de suite :** DocuSeal, pour faire signer devis et contrats.
+- **Utile tout de suite :** DocuSeal, pour faire signer devis et contrats. Le kit testé et son guide sont dans [`deploiement/docuseal/`](../deploiement/docuseal/GUIDE.md).
 - **Si tu as une équipe :** Vaultwarden, avec des sauvegardes. Si tu es seul, Bitwarden gratuit suffit.
 - **À éviter pour l'instant :** InvoiceShelf, à cause de la réforme et de la fin des correctifs de la v2 en 2027.
 - **Inutile sans développeur ni gros client exigeant :** Infisical et Comp AI.
