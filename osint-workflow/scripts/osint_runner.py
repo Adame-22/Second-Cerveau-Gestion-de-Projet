@@ -1827,6 +1827,89 @@ def build_phone_osint_urls(phones=None):
     return urls
 
 
+def detect_password_reuse(breaches):
+    """Detect password reuse risk across breaches."""
+    email_pw_breaches = {}
+    for b in (breaches or []):
+        if "Passwords" in b.data_types:
+            email_pw_breaches.setdefault(b.email, []).append(b.breach_name)
+    at_risk = []
+    for email, names in sorted(email_pw_breaches.items(), key=lambda x: -len(x[1])):
+        at_risk.append({"email": email, "breach_count": len(names), "breaches": names})
+    total = sum(len(v) for v in email_pw_breaches.values())
+    max_count = max((len(v) for v in email_pw_breaches.values()), default=0)
+    if max_count >= 3:
+        level = "CRITIQUE"
+    elif max_count == 2:
+        level = "ELEVE"
+    elif max_count == 1:
+        level = "MOYEN"
+    else:
+        level = "FAIBLE"
+    return {"at_risk_emails": at_risk, "total_password_breaches": total, "reuse_risk_level": level}
+
+
+SOCIAL_SITES = {"facebook", "twitter", "instagram", "tiktok", "snapchat", "pinterest", "reddit",
+                "tumblr", "mastodon", "vk", "ok.ru", "weibo", "threads"}
+PROFESSIONAL_SITES = {"linkedin", "github", "gitlab", "bitbucket", "stackoverflow", "malt",
+                      "wellfound", "angellist", "crunchbase", "glassdoor", "indeed", "viadeo"}
+SHOPPING_SITES = {"amazon", "ebay", "aliexpress", "cdiscount", "fnac", "leboncoin", "vinted",
+                  "etsy", "wish", "rakuten", "zalando"}
+GAMING_SITES = {"steam", "epic", "playstation", "xbox", "twitch", "discord", "roblox",
+                "minecraft", "battle.net", "origin", "ubisoft", "gog"}
+COMMS_SITES = {"gmail", "outlook", "yahoo", "protonmail", "telegram", "whatsapp", "signal",
+               "skype", "zoom", "slack", "messenger"}
+
+
+def compute_digital_footprint(findings, breaches=None, companies=None, whois_results=None,
+                               dns_results=None, github_profiles=None, gravatar_profiles=None,
+                               telegram_results=None):
+    """Compute a detailed digital footprint breakdown by category."""
+    categories = {
+        "Reseaux sociaux": {"sites": SOCIAL_SITES, "count": 0, "examples": []},
+        "Professionnel": {"sites": PROFESSIONAL_SITES, "count": 0, "examples": []},
+        "Communication": {"sites": COMMS_SITES, "count": 0, "examples": []},
+        "E-commerce": {"sites": SHOPPING_SITES, "count": 0, "examples": []},
+        "Gaming": {"sites": GAMING_SITES, "count": 0, "examples": []},
+        "Autre": {"sites": set(), "count": 0, "examples": []},
+    }
+    for f in (findings or []):
+        site_lower = (f.site or "").lower()
+        matched = False
+        for cat_name, cat in categories.items():
+            if cat_name == "Autre":
+                continue
+            if any(s in site_lower for s in cat["sites"]):
+                cat["count"] += 1
+                if len(cat["examples"]) < 3:
+                    cat["examples"].append(f.site)
+                matched = True
+                break
+        if not matched:
+            categories["Autre"]["count"] += 1
+            if len(categories["Autre"]["examples"]) < 3:
+                categories["Autre"]["examples"].append(f.site)
+
+    leak_count = len(breaches or [])
+    domain_count = len([w for w in (whois_results or []) if w]) + len(dns_results or [])
+    pro_extra = len(github_profiles or []) + len(companies or [])
+    categories["Professionnel"]["count"] += pro_extra
+
+    def score(count, max_ref=10):
+        return min(100, int((count / max_ref) * 100))
+
+    details = []
+    for cat_name, cat in categories.items():
+        s = score(cat["count"])
+        details.append({"category": cat_name, "score": s, "count": cat["count"], "examples": cat["examples"]})
+    details.append({"category": "Fuites de donnees", "score": score(leak_count, 5), "count": leak_count, "examples": []})
+    details.append({"category": "Domaines / DNS", "score": score(domain_count, 3), "count": domain_count, "examples": []})
+
+    total = len(findings or [])
+    overall = min(100, int((total / 20) * 100)) if total else 0
+    return {"overall": overall, "total_accounts": total, "category_details": details}
+
+
 # --- Report ---
 
 def cell(text):
@@ -1841,7 +1924,8 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
                    crt_sh_results=None, github_profiles=None, age_info=None,
                    email_guesses=None, phone_osint_urls=None, professional_dorks=None, breach_analysis=None,
                    gravatar_profiles=None, telegram_results=None, relationship_graph=None,
-                   data_broker_urls=None, social_engineering_risk=None, action_priorities=None):
+                   data_broker_urls=None, social_engineering_risk=None, action_priorities=None,
+                   password_reuse=None, digital_footprint=None):
     by_kind = {"username": [], "email": []}
     for finding in findings:
         by_kind[finding.kind].append(finding)
@@ -2442,6 +2526,35 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
                 out.append(f"- [ ] {r}")
             out.append("")
 
+    # --- Password reuse ---
+    if password_reuse and password_reuse.get("at_risk_emails"):
+        pr = password_reuse
+        out += ["", "---", "", f"## Risque de reutilisation de mots de passe : {pr['reuse_risk_level']}", ""]
+        out.append(f"**{pr['total_password_breaches']}** fuite(s) contenant des mots de passe detectee(s).")
+        out.append("")
+        out.append("| Email | Nb fuites avec mot de passe | Fuites |")
+        out.append("|---|---|---|")
+        for entry in pr["at_risk_emails"]:
+            out.append(f"| {cell(entry['email'])} | {entry['breach_count']} | {cell(', '.join(entry['breaches']))} |")
+        out.append("")
+        if pr["reuse_risk_level"] in ("CRITIQUE", "ELEVE"):
+            out.append("> **ATTENTION** : Si le meme mot de passe est utilise sur plusieurs services, "
+                       "un attaquant peut acceder a tous ces comptes a partir d'une seule fuite.")
+            out.append("")
+
+    # --- Digital footprint ---
+    if digital_footprint:
+        df = digital_footprint
+        out += ["", "---", "", f"## Empreinte numerique : {df['overall']}/100", ""]
+        out.append(f"**{df['total_accounts']}** comptes identifies au total.")
+        out.append("")
+        out.append("| Categorie | Score | Comptes | Exemples |")
+        out.append("|---|---|---|---|")
+        for cat in df["category_details"]:
+            examples = ", ".join(cat["examples"][:3]) if cat["examples"] else "-"
+            out.append(f"| {cell(cat['category'])} | {cat['score']}/100 | {cat['count']} | {cell(examples)} |")
+        out.append("")
+
     # --- Action plan ---
     _rs = risk_score if risk_score is not None else 0
     out += ["", "---", "", "## Plan d'action", ""]
@@ -2451,51 +2564,48 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
     elif _rs >= 40:
         out += ["**ATTENTION : score de risque ELEVE ({}/100). Actions correctives recommandees sous 7 jours.**".format(_rs), ""]
 
-    if breaches:
-        out += [
-            "### Priorite 1 : Fuites de donnees",
-            "",
-            "- [ ] **IMMEDIAT** : Changer les mots de passe des services concernes par les fuites.",
-            "- [ ] Verifier sur https://haveibeenpwned.com si d'autres emails ont fuite.",
-            "- [ ] Activer la double authentification (2FA) sur tous les comptes sensibles.",
-            "- [ ] Surveiller les releves bancaires (risque d'usurpation d'identite).",
-        ]
-        pwd_breaches = [b for b in breaches if "Passwords" in b.data_types]
-        if pwd_breaches:
-            out.append(f"- [ ] **CRITIQUE** : {len(pwd_breaches)} fuite(s) contiennent des mots de passe. "
-                        "Changer TOUS les mots de passe identiques sur d'autres services.")
-        out.append("")
-
-    if companies:
-        out += [
-            "### Priorite 2 : Exposition via les registres d'entreprise",
-            "",
-            "- [ ] Verifier si l'adresse du siege est l'adresse personnelle.",
-            "- [ ] Si oui, envisager une domiciliation commerciale pour masquer l'adresse.",
-            "- [ ] Contacter Pappers.fr et societe.com pour demander le masquage de certaines donnees.",
-            "",
-        ]
+    if action_priorities:
+        ap = action_priorities
+        if ap.get("urgent"):
+            out += ["### Priorite 1 — URGENT", ""]
+            for item in ap["urgent"]:
+                out.append(f"- [ ] **{item}**")
+            out.append("")
+        if ap.get("important"):
+            out += ["### Priorite 2 — IMPORTANT", ""]
+            for item in ap["important"]:
+                out.append(f"- [ ] {item}")
+            out.append("")
+        if ap.get("recommended"):
+            out += ["### Priorite 3 — RECOMMANDE", ""]
+            for item in ap["recommended"]:
+                out.append(f"- [ ] {item}")
+            out.append("")
+    else:
+        if breaches:
+            out += [
+                "### Priorite 1 : Fuites de donnees",
+                "",
+                "- [ ] **IMMEDIAT** : Changer les mots de passe des services concernes par les fuites.",
+                "- [ ] Activer la double authentification (2FA) sur tous les comptes sensibles.",
+                "",
+            ]
+        if companies:
+            out += [
+                "### Priorite 2 : Exposition via les registres d'entreprise",
+                "",
+                "- [ ] Verifier si l'adresse du siege est l'adresse personnelle.",
+                "",
+            ]
 
     _dns_no_spf = [d for d in (dns_results or []) if hasattr(d, "spf") and not d.spf]
     _dns_no_dmarc = [d for d in (dns_results or []) if hasattr(d, "dmarc") and not d.dmarc]
     if _dns_no_spf or _dns_no_dmarc:
-        out += ["### Priorite 2b : Securite email (DNS)", ""]
+        out += ["### Securite email (DNS)", ""]
         for d in _dns_no_spf:
-            out.append(f"- [ ] Configurer un enregistrement SPF sur **{d.domain}** pour empecher l'usurpation.")
+            out.append(f"- [ ] Configurer un enregistrement SPF sur **{d.domain}**")
         for d in _dns_no_dmarc:
-            out.append(f"- [ ] Configurer un enregistrement DMARC sur **{d.domain}** pour proteger la reputation email.")
-        out.append("")
-
-    if findings:
-        out += [
-            "### Priorite 3 : Comptes en ligne",
-            "",
-            "Pour chaque compte, decider avec le client : conserver, passer en prive, ou supprimer.",
-            "",
-        ]
-        for f in findings:
-            target = f.url or f.site
-            out.append(f"- [ ] **{f.site}** ({f.identifier}) : {target}")
+            out.append(f"- [ ] Configurer un enregistrement DMARC sur **{d.domain}**")
         out.append("")
 
     out += [
@@ -2506,7 +2616,6 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
         "- [ ] Supprimer les comptes inutiles (liens directs : https://justdeleteme.xyz).",
         "- [ ] Pour les contenus non supprimables : demande d'effacement (RGPD art. 17), puis dereferencement Google.",
         "- [ ] Utiliser a l'avenir un pseudo et un email differents par service.",
-        "- [ ] Ouvrir les liens Google dorks de la section 12 pour trouver d'autres traces.",
         "",
         "### Suivi",
         "",
@@ -2832,6 +2941,11 @@ def main(argv=None):
     action_priorities = generate_action_priorities(
         breaches, findings, companies, whois_results, reputation_results,
         address_leaks, data_classification, risk_score)
+    password_reuse = detect_password_reuse(breaches)
+    digital_footprint = compute_digital_footprint(
+        findings, breaches=breaches, companies=companies, whois_results=whois_results,
+        dns_results=dns_results, github_profiles=github_profiles,
+        gravatar_profiles=gravatar_profiles, telegram_results=telegram_results)
 
     elapsed = datetime.now() - started
 
@@ -2839,7 +2953,7 @@ def main(argv=None):
         json.dumps(
             {
                 "meta": {
-                    "version": "3.0.0",
+                    "version": "4.0.0",
                     "tool": "osint-workflow",
                     "duration_seconds": int(elapsed.total_seconds()),
                 },
@@ -2886,6 +3000,8 @@ def main(argv=None):
                 "data_broker_urls": data_broker_urls,
                 "social_engineering_risk": social_engineering_risk,
                 "action_priorities": action_priorities,
+                "password_reuse": password_reuse,
+                "digital_footprint": digital_footprint,
             },
             indent=2, ensure_ascii=False,
         ),
@@ -2912,7 +3028,8 @@ def main(argv=None):
                           gravatar_profiles=gravatar_profiles, telegram_results=telegram_results,
                           relationship_graph=relationship_graph,
                           data_broker_urls=data_broker_urls, social_engineering_risk=social_engineering_risk,
-                          action_priorities=action_priorities),
+                          action_priorities=action_priorities,
+                          password_reuse=password_reuse, digital_footprint=digital_footprint),
             encoding="utf-8",
         )
         log(f"[*] Rapport : {report_file}")

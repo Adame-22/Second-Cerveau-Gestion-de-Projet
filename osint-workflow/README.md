@@ -51,17 +51,21 @@ venv\Scripts\pip install -r requirements.txt
 | `--skip OUTIL` | Ne pas lancer un module : `holehe`, `sherlock`, `maigret`, `breach`, `company`, `whois`, `phone`, `reputation`, `wayback`, `dns`, `paste`, `social`, `family`, `crt`, `github` |
 | `--timeout`, `--tool-timeout` | Timeout par requete (10 s) et duree maximale par outil (1800 s) |
 | `--pdf` | Generer un export PDF en plus du Markdown (necessite `weasyprint`) |
+| `--encrypt-pdf MOT_DE_PASSE` | Chiffrer le PDF avec un mot de passe (necessite `pikepdf`) |
+| `--xlsx` | Generer un export Excel professionnel (necessite `openpyxl`) |
 | `--json-only` | Generer uniquement `resultats.json` (pas de Markdown/PDF/CSV) |
 | `--quiet`, `-q` | Mode silencieux : supprime les messages de progression |
+| `--output-dir CHEMIN` | Repertoire de sortie personnalise |
 | `--config CHEMIN` | Fichier config.json alternatif (cles API, options par defaut) |
 
 ## Rapport genere
 
 Chaque audit cree `reports/<date>_<mandat>/` (jamais versionne) :
 
-- `RAPPORT.md` : livrable client complet avec 20+ sections
-- `RAPPORT.pdf` : version PDF professionnelle (si `--pdf`)
+- `RAPPORT.md` : livrable client complet avec 38+ sections
+- `RAPPORT.pdf` : version PDF professionnelle (si `--pdf`, chiffrable avec `--encrypt-pdf`)
 - `resultats.json` : memes donnees, exploitables par un autre outil
+- `resultats.xlsx` : export Excel professionnel avec mise en forme (si `--xlsx`)
 - `comptes.csv` : export tableur des comptes trouves
 - `resume.csv` : resume de l'audit (avec score et niveau de risque)
 - `fuites.csv` : detail des fuites (si trouvees)
@@ -102,7 +106,12 @@ Chaque audit cree `reports/<date>_<mandat>/` (jamais versionne) :
 30. **Certificats SSL** : transparence des certificats via crt.sh (sous-domaines, historique)
 31. **Profils GitHub** : repos, followers, bio, localisation, entreprise
 32. **Age calcule** : a partir de la date de naissance fournie
-33. **Plan d'action** : recommandations priorisees
+33. **Graphe de relations** : diagramme Mermaid des liens entre identites, comptes, entreprises
+34. **Courtiers de donnees** : liens de recherche et de retrait sur 10+ courtiers (Pages Blanches, Spokeo, Whitepages, etc.)
+35. **Risque d'ingenierie sociale** : vecteurs d'attaque, questions de securite compromises, recommandations
+36. **Reutilisation de mots de passe** : emails exposes dans plusieurs fuites avec mots de passe
+37. **Empreinte numerique** : score par categorie (reseaux sociaux, professionnel, e-commerce, gaming, etc.)
+38. **Plan d'action dynamique** : recommandations priorisees (URGENT/IMPORTANT/RECOMMANDE) basees sur les resultats reels
 
 ## Modules d'investigation
 
@@ -136,6 +145,13 @@ Chaque audit cree `reports/<date>_<mandat>/` (jamais versionne) :
 | Professional dorks | Nom/Email/Pseudo | Dorks LinkedIn, Societe.com, Infogreffe, Malt, Glassdoor, Viadeo |
 | Breach severity | Fuites | Analyse de criticite : mots de passe, donnees financieres, identite |
 | Age compute | Date naissance | Calcul de l'age a partir de la date de naissance (JJ/MM/AAAA) |
+| Data broker check | Nom/Email | URLs de recherche et retrait sur 10+ courtiers de donnees |
+| Social engineering risk | Toutes sources | Evaluation des vecteurs d'attaque, questions de securite compromises |
+| Password reuse | Fuites | Detection de reutilisation de mots de passe entre fuites |
+| Digital footprint | Toutes sources | Score d'empreinte numerique par categorie (social, pro, gaming, etc.) |
+| Dynamic action plan | Toutes sources | Plan d'action priorise (URGENT/IMPORTANT/RECOMMANDE) |
+| XLSX export | resultats.json | Export Excel professionnel avec mise en forme (6 onglets) |
+| Relationship graph | Toutes sources | Diagramme Mermaid des liens identite-comptes-entreprises |
 
 Les scans de la phase 1 (comptes) et de la phase 2 (analyse approfondie) tournent en parallele.
 

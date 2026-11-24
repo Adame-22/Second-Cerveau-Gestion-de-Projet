@@ -1153,3 +1153,84 @@ class XlsxExportTest(unittest.TestCase):
         import ast
         path = Path(__file__).resolve().parent.parent / "scripts" / "xlsx_export.py"
         ast.parse(path.read_text(encoding="utf-8"))
+
+
+class TestPasswordReuse(unittest.TestCase):
+    def test_no_breaches(self):
+        result = runner.detect_password_reuse([])
+        self.assertEqual(result["reuse_risk_level"], "FAIBLE")
+        self.assertEqual(result["at_risk_emails"], [])
+        self.assertEqual(result["total_password_breaches"], 0)
+
+    def test_breaches_no_passwords(self):
+        breaches = [runner.BreachInfo("a@b.com", "Leak1", data_types=["Email addresses"])]
+        result = runner.detect_password_reuse(breaches)
+        self.assertEqual(result["reuse_risk_level"], "FAIBLE")
+        self.assertEqual(result["at_risk_emails"], [])
+
+    def test_single_pw_breach(self):
+        breaches = [runner.BreachInfo("a@b.com", "Leak1", data_types=["Passwords"])]
+        result = runner.detect_password_reuse(breaches)
+        self.assertEqual(result["reuse_risk_level"], "MOYEN")
+        self.assertEqual(len(result["at_risk_emails"]), 1)
+        self.assertEqual(result["at_risk_emails"][0]["breach_count"], 1)
+
+    def test_multiple_pw_breaches_same_email(self):
+        breaches = [
+            runner.BreachInfo("a@b.com", "Leak1", data_types=["Passwords"]),
+            runner.BreachInfo("a@b.com", "Leak2", data_types=["Passwords"]),
+            runner.BreachInfo("a@b.com", "Leak3", data_types=["Passwords"]),
+        ]
+        result = runner.detect_password_reuse(breaches)
+        self.assertEqual(result["reuse_risk_level"], "CRITIQUE")
+        self.assertEqual(result["at_risk_emails"][0]["breach_count"], 3)
+        self.assertEqual(result["total_password_breaches"], 3)
+
+    def test_two_pw_breaches(self):
+        breaches = [
+            runner.BreachInfo("a@b.com", "Leak1", data_types=["Passwords"]),
+            runner.BreachInfo("a@b.com", "Leak2", data_types=["Passwords"]),
+        ]
+        result = runner.detect_password_reuse(breaches)
+        self.assertEqual(result["reuse_risk_level"], "ELEVE")
+
+
+class TestDigitalFootprint(unittest.TestCase):
+    def test_empty(self):
+        result = runner.compute_digital_footprint([])
+        self.assertEqual(result["overall"], 0)
+        self.assertEqual(result["total_accounts"], 0)
+        self.assertGreater(len(result["category_details"]), 0)
+
+    def test_social_media_accounts(self):
+        findings = [
+            runner.Finding("user1", "username", "Facebook", sources=["sherlock"]),
+            runner.Finding("user1", "username", "Instagram", sources=["sherlock"]),
+            runner.Finding("user1", "username", "Twitter", sources=["sherlock"]),
+        ]
+        result = runner.compute_digital_footprint(findings)
+        self.assertEqual(result["total_accounts"], 3)
+        social_cat = [c for c in result["category_details"] if c["category"] == "Reseaux sociaux"][0]
+        self.assertEqual(social_cat["count"], 3)
+        self.assertGreater(social_cat["score"], 0)
+
+    def test_mixed_categories(self):
+        findings = [
+            runner.Finding("user1", "username", "LinkedIn", sources=["sherlock"]),
+            runner.Finding("user1", "username", "Steam", sources=["sherlock"]),
+            runner.Finding("user1", "email", "Gmail", sources=["holehe"]),
+            runner.Finding("user1", "username", "Amazon", sources=["sherlock"]),
+        ]
+        result = runner.compute_digital_footprint(findings)
+        self.assertEqual(result["total_accounts"], 4)
+        pro_cat = [c for c in result["category_details"] if c["category"] == "Professionnel"][0]
+        self.assertGreater(pro_cat["count"], 0)
+
+    def test_with_breaches_and_github(self):
+        findings = [runner.Finding("user1", "username", "Reddit", sources=["sherlock"])]
+        breaches = [runner.BreachInfo("a@b.com", "Leak1")]
+        gp = runner.GitHubProfile("user1", public_repos=5, followers=10)
+        result = runner.compute_digital_footprint(
+            findings, breaches=breaches, github_profiles=[gp])
+        leak_cat = [c for c in result["category_details"] if c["category"] == "Fuites de donnees"][0]
+        self.assertEqual(leak_cat["count"], 1)
