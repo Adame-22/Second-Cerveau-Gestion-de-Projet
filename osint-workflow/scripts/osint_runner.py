@@ -1133,6 +1133,41 @@ def build_correlations(findings, profile_details, breaches, whois_results, reput
     return correlations
 
 
+def build_dark_web_check_urls(emails=None, usernames=None, phones=None):
+    """Generate URLs for checking dark web / leak database exposure (manual verification links)."""
+    urls = []
+    for email in (emails or []):
+        encoded = urllib.parse.quote(email)
+        urls.append({"service": "Have I Been Pwned", "url": f"https://haveibeenpwned.com/account/{encoded}",
+                     "type": "email", "identifier": email})
+        urls.append({"service": "Firefox Monitor", "url": "https://monitor.firefox.com/breaches",
+                     "type": "email", "identifier": email})
+        urls.append({"service": "DeHashed", "url": f"https://dehashed.com/search?query={encoded}",
+                     "type": "email", "identifier": email})
+        urls.append({"service": "LeakCheck", "url": f"https://leakcheck.io/check/{encoded}",
+                     "type": "email", "identifier": email})
+        urls.append({"service": "IntelligenceX", "url": f"https://intelx.io/?s={encoded}",
+                     "type": "email", "identifier": email})
+        urls.append({"service": "Snusbase", "url": f"https://snusbase.com/search?q={encoded}",
+                     "type": "email", "identifier": email})
+    for phone in (phones or []):
+        encoded = urllib.parse.quote(phone)
+        urls.append({"service": "Phoneinfoga", "url": f"https://demo.phoneinfoga.crvx.fr/scan?number={encoded}",
+                     "type": "phone", "identifier": phone})
+        urls.append({"service": "Sync.me", "url": f"https://sync.me/search/?q={encoded}",
+                     "type": "phone", "identifier": phone})
+        urls.append({"service": "Truecaller", "url": f"https://www.truecaller.com/search/fr/{encoded.replace('+', '')}",
+                     "type": "phone", "identifier": phone})
+    for username in (usernames or []):
+        encoded = urllib.parse.quote(username)
+        urls.append({"service": "NameCheckr", "url": f"https://www.namecheckr.com/?q={encoded}",
+                     "type": "username", "identifier": username})
+        urls.append({"service": "KnowEm", "url": f"https://knowem.com/checkusernames.php?u={encoded}",
+                     "type": "username", "identifier": username})
+    return urls
+
+
+
 # --- Report ---
 
 def cell(text):
