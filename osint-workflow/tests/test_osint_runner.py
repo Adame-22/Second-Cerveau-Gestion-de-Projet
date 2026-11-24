@@ -146,5 +146,121 @@ class ProfileExtractTest(unittest.TestCase):
         self.assertNotIn("age", details)
 
 
+class ReputationTest(unittest.TestCase):
+    def test_reputation_unreachable_returns_error(self):
+        raw_dir = Path(tempfile.mkdtemp())
+        with patch("osint_runner.urllib.request.urlopen", side_effect=Exception("timeout")):
+            result = runner.run_email_reputation("test@example.com", raw_dir)
+        self.assertEqual(result["error"], "unreachable")
+        self.assertEqual(result["email"], "test@example.com")
+
+    def test_reputation_parses_response(self):
+        raw_dir = Path(tempfile.mkdtemp())
+        fake_resp = json.dumps({
+            "email": "test@example.com",
+            "reputation": "high",
+            "suspicious": False,
+            "references": 10,
+            "details": {
+                "blacklisted": False,
+                "malicious_activity": False,
+                "credentials_leaked": True,
+                "data_breach": True,
+                "first_seen": "2015-01-01",
+                "last_seen": "2024-06-01",
+                "domain_reputation": "high",
+                "profiles": ["twitter", "linkedin"],
+                "spoofable": False,
+                "spam": False,
+            }
+        }).encode()
+
+        class FakeResp:
+            def read(self):
+                return fake_resp
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                pass
+
+        with patch("osint_runner.urllib.request.urlopen", return_value=FakeResp()):
+            result = runner.run_email_reputation("test@example.com", raw_dir)
+        self.assertEqual(result["reputation"], "high")
+        self.assertFalse(result["suspicious"])
+        self.assertTrue(result["credentials_leaked"])
+        self.assertEqual(result["profiles"], ["twitter", "linkedin"])
+
+
+class PasteSearchTest(unittest.TestCase):
+    def test_paste_urls_with_email_and_username(self):
+        urls = runner.build_paste_search_urls(emails=["a@b.com"], usernames=["bob"])
+        labels = [u["label"] for u in urls]
+        self.assertTrue(any("Pastebin" in l and "a@b.com" in l for l in labels))
+        self.assertTrue(any("GitHub Gists" in l and "bob" in l for l in labels))
+        self.assertTrue(any("IntelligenceX" in l for l in labels))
+        for u in urls:
+            self.assertTrue(u["url"].startswith("https://"))
+
+    def test_paste_urls_empty(self):
+        urls = runner.build_paste_search_urls()
+        self.assertEqual(urls, [])
+
+    def test_paste_urls_with_phone(self):
+        urls = runner.build_paste_search_urls(phones=["+33612345678"])
+        self.assertTrue(any("IntelligenceX" in u["label"] for u in urls))
+
+
+class WaybackTest(unittest.TestCase):
+    def test_parse_wayback_timestamp(self):
+        self.assertEqual(runner._parse_wayback_timestamp("20060315120000"), "2006-03-15")
+        self.assertEqual(runner._parse_wayback_timestamp("2020"), "2020")
+
+    def test_wayback_no_data(self):
+        raw_dir = Path(tempfile.mkdtemp())
+        with patch("osint_runner.http_get_json", return_value=None):
+            results = runner.run_wayback_check(["https://example.com"], raw_dir)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].total_snapshots, 0)
+
+    def test_wayback_with_data(self):
+        raw_dir = Path(tempfile.mkdtemp())
+        fake_cdx = [
+            ["timestamp", "original", "statuscode"],
+            ["20100601120000", "http://example.com", "200"],
+            ["20231215120000", "http://example.com", "200"],
+        ]
+        with patch("osint_runner.http_get_json", return_value=fake_cdx):
+            results = runner.run_wayback_check(["https://example.com"], raw_dir)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].oldest_snapshot, "2010-06-01")
+        self.assertEqual(results[0].newest_snapshot, "2023-12-15")
+        self.assertEqual(results[0].total_snapshots, 2)
+
+
+class DnsTest(unittest.TestCase):
+    def test_dns_skips_free_providers(self):
+        result = runner.run_dns_lookup("gmail.com", Path(tempfile.mkdtemp()))
+        self.assertIsNone(result)
+
+    def test_dns_skips_sfr(self):
+        result = runner.run_dns_lookup("sfr.fr", Path(tempfile.mkdtemp()))
+        self.assertIsNone(result)
+
+    def test_dns_result_dataclass(self):
+        dr = runner.DnsResult(domain="test.fr", mx_records=["mx1.ovh.net"], hosting_hints=["Email heberge par OVH"])
+        self.assertEqual(dr.domain, "test.fr")
+        self.assertEqual(dr.mx_records, ["mx1.ovh.net"])
+
+
+class SkipChoicesTest(unittest.TestCase):
+    def test_skip_new_modules(self):
+        opts = runner.parse_args(["-m", "M1", "-e", "a@b.com",
+                                  "--skip", "wayback", "--skip", "dns", "--skip", "paste", "--skip", "reputation"])
+        self.assertIn("wayback", opts.skip)
+        self.assertIn("dns", opts.skip)
+        self.assertIn("paste", opts.skip)
+        self.assertIn("reputation", opts.skip)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -17,6 +17,20 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 REPORTS_DIR = ROOT / "reports"
+CONFIG_PATH = ROOT / "config.json"
+
+
+def load_config(path=None):
+    p = Path(path) if path else CONFIG_PATH
+    if p.exists():
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+CONFIG = load_config()
 
 EMAIL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._%+\-]*@[A-Za-z0-9][A-Za-z0-9.\-]*\.[A-Za-z]{2,}$")
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]{0,63}$")
@@ -257,10 +271,11 @@ def run_breach_check(email, raw_dir):
     ctx = ssl.create_default_context()
     if CA_BUNDLE and os.path.exists(CA_BUNDLE):
         ctx.load_verify_locations(CA_BUNDLE)
-    req = urllib.request.Request(url, headers={
-        "User-Agent": "OSINT-Workflow-Audit",
-        "hibp-api-key": "",
-    })
+    hibp_key = CONFIG.get("hibp_api_key", "")
+    headers = {"User-Agent": "OSINT-Workflow-Audit"}
+    if hibp_key:
+        headers["hibp-api-key"] = hibp_key
+    req = urllib.request.Request(url, headers=headers)
 
     try:
         with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
@@ -422,6 +437,210 @@ def run_whois_lookup(email, raw_dir):
         return None
 
 
+# --- NEW: Email reputation (emailrep.io free API) ---
+
+def run_email_reputation(email, raw_dir):
+    """Query emailrep.io for email reputation, breach exposure and profile presence."""
+    work_dir = raw_dir / "reputation"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    import ssl
+    ctx = ssl.create_default_context()
+    if CA_BUNDLE and os.path.exists(CA_BUNDLE):
+        ctx.load_verify_locations(CA_BUNDLE)
+    url = f"https://emailrep.io/{urllib.parse.quote(email)}"
+    req = urllib.request.Request(url, headers={"User-Agent": "OSINT-Workflow", "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        data = None
+
+    if not data or "reputation" not in data:
+        (work_dir / f"reputation_{safe_name(email)}.json").write_text(
+            json.dumps({"email": email, "error": "unreachable"}, indent=2), encoding="utf-8"
+        )
+        return {"email": email, "error": "unreachable"}
+
+    details = data.get("details", {})
+    result = {
+        "email": email,
+        "reputation": data.get("reputation", ""),
+        "suspicious": data.get("suspicious", False),
+        "references": data.get("references", 0),
+        "blacklisted": details.get("blacklisted", False),
+        "malicious_activity": details.get("malicious_activity", False),
+        "credentials_leaked": details.get("credentials_leaked", False),
+        "data_breach": details.get("data_breach", False),
+        "first_seen": details.get("first_seen", ""),
+        "last_seen": details.get("last_seen", ""),
+        "domain_reputation": details.get("domain_reputation", ""),
+        "profiles": details.get("profiles", []),
+        "spoofable": details.get("spoofable", False),
+        "spam": details.get("spam", False),
+    }
+    (work_dir / f"reputation_{safe_name(email)}.json").write_text(
+        json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    return result
+
+
+# --- NEW: Paste / leak site search URLs ---
+
+def build_paste_search_urls(emails=None, usernames=None, phones=None):
+    """Build manual-check URLs for paste sites, GitHub gists, and leak databases."""
+    urls = []
+    for email in (emails or []):
+        q = urllib.parse.quote(email)
+        urls.append({"label": f"Pastebin ({email})", "url": f"https://www.google.com/search?q=site%3Apastebin.com+%22{q}%22"})
+        urls.append({"label": f"GitHub Gists ({email})", "url": f"https://gist.github.com/search?q=%22{q}%22"})
+        urls.append({"label": f"Dehashed ({email})", "url": f"https://www.dehashed.com/search?query=%22{q}%22"})
+        urls.append({"label": f"IntelligenceX ({email})", "url": f"https://intelx.io/?s=%22{q}%22"})
+    for u in (usernames or []):
+        q = urllib.parse.quote(u)
+        urls.append({"label": f"Pastebin ({u})", "url": f"https://www.google.com/search?q=site%3Apastebin.com+%22{q}%22"})
+        urls.append({"label": f"GitHub Gists ({u})", "url": f"https://gist.github.com/search?q=%22{q}%22"})
+        urls.append({"label": f"IntelligenceX ({u})", "url": f"https://intelx.io/?s=%22{q}%22"})
+    for phone in (phones or []):
+        clean = phone.replace(" ", "").replace("-", "").replace(".", "")
+        q = urllib.parse.quote(clean)
+        urls.append({"label": f"IntelligenceX ({phone})", "url": f"https://intelx.io/?s=%22{q}%22"})
+    return urls
+
+
+# --- NEW: Wayback Machine check (CDX API, free, no key) ---
+
+@dataclass
+class WaybackResult:
+    url: str
+    oldest_snapshot: str = ""
+    newest_snapshot: str = ""
+    total_snapshots: int = 0
+
+
+def _parse_wayback_timestamp(ts):
+    """Convert CDX timestamp '20060101120000' to 'YYYY-MM-DD'."""
+    if len(ts) >= 8:
+        return f"{ts[:4]}-{ts[4:6]}-{ts[6:8]}"
+    return ts
+
+
+def run_wayback_check(urls, raw_dir):
+    work_dir = raw_dir / "wayback"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    results = []
+    for url in urls:
+        domain = re.sub(r"^https?://", "", url).split("/")[0]
+        cdx_url = (
+            f"https://web.archive.org/cdx/search/cdx?url={urllib.parse.quote(domain)}"
+            f"&output=json&fl=timestamp,original,statuscode&collapse=timestamp:6&limit=100"
+        )
+        data = http_get_json(cdx_url, timeout=20)
+        if data and isinstance(data, list) and len(data) > 1:
+            rows = data[1:]  # first row is header
+            timestamps = [r[0] for r in rows if len(r) >= 1]
+            results.append(WaybackResult(
+                url=domain,
+                oldest_snapshot=_parse_wayback_timestamp(timestamps[0]) if timestamps else "",
+                newest_snapshot=_parse_wayback_timestamp(timestamps[-1]) if timestamps else "",
+                total_snapshots=len(timestamps),
+            ))
+        else:
+            results.append(WaybackResult(url=domain, total_snapshots=0))
+
+    (work_dir / "wayback.json").write_text(
+        json.dumps([asdict(r) for r in results], indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    return results
+
+
+# --- NEW: DNS enumeration for personal email domains ---
+
+FREE_EMAIL_PROVIDERS = {
+    "gmail.com", "yahoo.com", "yahoo.fr", "hotmail.com", "hotmail.fr",
+    "outlook.com", "outlook.fr", "live.com", "live.fr", "aol.com",
+    "protonmail.com", "proton.me", "icloud.com", "me.com", "mac.com",
+    "gmx.com", "gmx.fr", "mail.com", "laposte.net", "orange.fr",
+    "free.fr", "sfr.fr", "wanadoo.fr", "bbox.fr",
+}
+
+
+@dataclass
+class DnsResult:
+    domain: str
+    mx_records: list = field(default_factory=list)
+    txt_records: list = field(default_factory=list)
+    spf: str = ""
+    dmarc: str = ""
+    hosting_hints: list = field(default_factory=list)
+
+
+def run_dns_lookup(domain, raw_dir):
+    if domain in FREE_EMAIL_PROVIDERS:
+        return None
+
+    work_dir = raw_dir / "dns"
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    result = DnsResult(domain=domain)
+
+    # MX records via dig
+    try:
+        proc = subprocess.run(
+            ["dig", "+short", "MX", domain], capture_output=True, text=True, timeout=10
+        )
+        if proc.returncode == 0:
+            for line in proc.stdout.strip().splitlines():
+                parts = line.strip().rstrip(".").split()
+                if len(parts) >= 2:
+                    result.mx_records.append(parts[-1])
+                    host = parts[-1].lower()
+                    if "google" in host or "gmail" in host:
+                        result.hosting_hints.append("Email heberge par Google Workspace")
+                    elif "outlook" in host or "microsoft" in host:
+                        result.hosting_hints.append("Email heberge par Microsoft 365")
+                    elif "ovh" in host:
+                        result.hosting_hints.append("Email heberge par OVH")
+                    elif "gandi" in host:
+                        result.hosting_hints.append("Email heberge par Gandi")
+    except Exception:
+        pass
+
+    # TXT records (SPF)
+    try:
+        proc = subprocess.run(
+            ["dig", "+short", "TXT", domain], capture_output=True, text=True, timeout=10
+        )
+        if proc.returncode == 0:
+            for line in proc.stdout.strip().splitlines():
+                txt = line.strip().strip('"')
+                result.txt_records.append(txt)
+                if txt.startswith("v=spf1"):
+                    result.spf = txt
+    except Exception:
+        pass
+
+    # DMARC
+    try:
+        proc = subprocess.run(
+            ["dig", "+short", "TXT", f"_dmarc.{domain}"], capture_output=True, text=True, timeout=10
+        )
+        if proc.returncode == 0:
+            for line in proc.stdout.strip().splitlines():
+                txt = line.strip().strip('"')
+                if txt.startswith("v=DMARC"):
+                    result.dmarc = txt
+    except Exception:
+        pass
+
+    # Deduplicate hosting hints
+    result.hosting_hints = sorted(set(result.hosting_hints))
+
+    (work_dir / f"dns_{safe_name(domain)}.json").write_text(
+        json.dumps(asdict(result), indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    return result
+
+
 # --- NEW: Google dorking (extract dork URLs for the report) ---
 
 def build_google_dorks(nom=None, emails=None, phones=None, usernames=None):
@@ -486,7 +705,8 @@ def cell(text):
     return str(text).replace("|", "\\|").replace("\n", " ")
 
 
-def render_report(opts, runs, findings, started, breaches, companies, phone_infos, whois_results, dorks, profile_details):
+def render_report(opts, runs, findings, started, breaches, companies, phone_infos, whois_results, dorks, profile_details,
+                   reputation_results=None, wayback_results=None, dns_results=None, paste_urls=None):
     by_kind = {"username": [], "email": []}
     for finding in findings:
         by_kind[finding.kind].append(finding)
@@ -615,8 +835,26 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
     else:
         out += ["", "## 6. Domaines email (WHOIS)", "", "Emails heberges sur des fournisseurs publics (aucun domaine personnel detecte)."]
 
+    # --- Email reputation ---
+    rep_valid = [r for r in (reputation_results or []) if not r.get("error")]
+    if rep_valid:
+        out += ["", "## 7. Reputation des emails", ""]
+        out.append("| Email | Reputation | Suspect | Credentials leaked | Data breach | Blacklisted | Profils detectes | Premiere apparition |")
+        out.append("|---|---|---|---|---|---|---|---|")
+        for r in rep_valid:
+            profiles = ", ".join(r.get("profiles", [])) or "-"
+            out.append(
+                f"| {cell(r['email'])} | {cell(r.get('reputation', ''))} | {'oui' if r.get('suspicious') else 'non'}"
+                f" | {'oui' if r.get('credentials_leaked') else 'non'} | {'oui' if r.get('data_breach') else 'non'}"
+                f" | {'oui' if r.get('blacklisted') else 'non'} | {cell(profiles)} | {cell(r.get('first_seen', ''))} |"
+            )
+        out.append("")
+        out.append("**Risque :** un email avec une mauvaise reputation ou marque comme suspect peut etre cible par des campagnes de phishing.")
+    else:
+        out += ["", "## 7. Reputation des emails", "", "Reputation non disponible (API emailrep.io non joignable ou module desactive)."]
+
     # --- Tool scan details ---
-    out += ["", "## 7. Detail des scans", ""]
+    out += ["", "## 8. Detail des scans", ""]
     out.append("| Outil | Identifiant | Etat | Comptes | Couverture |")
     out.append("|---|---|---|---|---|")
     for run in runs:
@@ -625,14 +863,14 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
 
     # --- Accounts found ---
     if by_kind["username"]:
-        out += ["", "## 8. Comptes trouves a partir des pseudos", "",
+        out += ["", "## 9. Comptes trouves a partir des pseudos", "",
                 "| Pseudo | Site | Lien | Vu par | Informations visibles |", "|---|---|---|---|---|"]
         for f in by_kind["username"]:
             infos = ", ".join(f"{k}: {v}" for k, v in f.details.items()) or "-"
             out.append(f"| {cell(f.identifier)} | {cell(f.site)} | {f.url} | {', '.join(f.sources)} | {cell(infos)} |")
 
     if by_kind["email"]:
-        out += ["", "## 9. Services ou l'email est inscrit", "",
+        out += ["", "## 10. Services ou l'email est inscrit", "",
                 "| Email | Service | Indices divulgues par le service |", "|---|---|---|"]
         for f in by_kind["email"]:
             infos = ", ".join(f"{k}: {v}" for k, v in f.details.items()) or "-"
@@ -640,18 +878,67 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
 
     # --- Leads ---
     if leads:
-        out += ["", "## 10. Autres identifiants / proches reperes", "",
+        out += ["", "## 11. Autres identifiants / proches reperes", "",
                 "Identifiants supplementaires trouves sur les profils. A confirmer avec le client :", ""]
         out += [f"- {lead}" for lead in leads]
 
     # --- Google dorks ---
     if dorks:
-        out += ["", "## 11. Pistes de recherche manuelle (Google dorks)", "",
+        out += ["", "## 12. Pistes de recherche manuelle (Google dorks)", "",
                 "Liens a ouvrir manuellement pour approfondir l'investigation :", ""]
         out.append("| Recherche | Lien |")
         out.append("|---|---|")
         for d in dorks:
             out.append(f"| {cell(d['label'])} | [Ouvrir]({d['url']}) |")
+
+    # --- Paste / leak search URLs ---
+    _paste_urls = paste_urls or []
+    if _paste_urls:
+        out += ["", "## 13. Recherche dans les pastes et bases de fuites", "",
+                "Liens a ouvrir manuellement pour chercher des traces dans les pastes et bases de fuites :", ""]
+        out.append("| Recherche | Lien |")
+        out.append("|---|---|")
+        for p in _paste_urls:
+            out.append(f"| {cell(p['label'])} | [Ouvrir]({p['url']}) |")
+
+    # --- DNS enumeration ---
+    _dns = dns_results or []
+    if _dns:
+        out += ["", "## 14. Analyse DNS des domaines email personnels", ""]
+        for dr in _dns:
+            out.append(f"### {dr.domain}")
+            out.append("")
+            if dr.mx_records:
+                out.append(f"- **Serveurs MX :** {', '.join(dr.mx_records)}")
+            if dr.hosting_hints:
+                for hint in dr.hosting_hints:
+                    out.append(f"- **Hebergement :** {hint}")
+            if dr.spf:
+                out.append(f"- **SPF :** `{cell(dr.spf)}`")
+            if dr.dmarc:
+                out.append(f"- **DMARC :** `{cell(dr.dmarc)}`")
+            if not dr.spf:
+                out.append("- **SPF :** non configure (risque d'usurpation d'email)")
+            if not dr.dmarc:
+                out.append("- **DMARC :** non configure (risque d'usurpation d'email)")
+            out.append("")
+        out.append("**Risque :** l'absence de SPF/DMARC facilite l'usurpation de l'adresse email du domaine. "
+                    "Les enregistrements MX revelent l'hebergeur email.")
+
+    # --- Wayback Machine ---
+    _wb = wayback_results or []
+    archived = [r for r in _wb if r.total_snapshots > 0]
+    if archived:
+        out += ["", "## 15. Historique web (Wayback Machine)", ""]
+        out.append("Profils ayant des archives dans la Wayback Machine (web.archive.org) :")
+        out.append("")
+        out.append("| URL | Plus ancien | Plus recent | Nb snapshots |")
+        out.append("|---|---|---|---|")
+        for r in archived:
+            out.append(f"| {cell(r.url)} | {cell(r.oldest_snapshot)} | {cell(r.newest_snapshot)} | {r.total_snapshots} |")
+        out.append("")
+        out.append("**Risque :** meme un profil supprime peut avoir ete archive. "
+                    "Consulter https://web.archive.org pour voir les versions passees.")
 
     # --- Action plan ---
     out += ["", "---", "", "## Plan d'action", ""]
@@ -697,7 +984,7 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
         "- [ ] Supprimer les comptes inutiles (liens directs : https://justdeleteme.xyz).",
         "- [ ] Pour les contenus non supprimables : demande d'effacement (RGPD art. 17), puis dereferencement Google.",
         "- [ ] Utiliser a l'avenir un pseudo et un email differents par service.",
-        "- [ ] Ouvrir les liens Google dorks de la section 11 pour trouver d'autres traces.",
+        "- [ ] Ouvrir les liens Google dorks de la section 12 pour trouver d'autres traces.",
         "",
         "## Limites",
         "",
@@ -727,11 +1014,21 @@ def parse_args(argv=None):
     parser.add_argument("--all-sites", action="store_true", help="Maigret : tous les sites (long)")
     parser.add_argument("--top-sites", type=int, default=500, help="Maigret : nombre de sites (defaut 500)")
     parser.add_argument("--skip", action="append", default=[],
-                        choices=["holehe", "sherlock", "maigret", "breach", "company", "whois", "phone"],
+                        choices=["holehe", "sherlock", "maigret", "breach", "company", "whois", "phone",
+                                 "reputation", "wayback", "dns", "paste"],
                         help="Module a ne pas lancer (repetable)")
     parser.add_argument("--timeout", type=int, default=10, help="Timeout par requete (defaut 10)")
     parser.add_argument("--tool-timeout", type=int, default=1800, help="Duree max par outil (defaut 1800)")
+    parser.add_argument("--pdf", action="store_true", default=None,
+                        help="Generer un PDF en plus du Markdown (necessite weasyprint)")
+    parser.add_argument("--config", help="Chemin vers un fichier config.json alternatif")
     opts = parser.parse_args(argv)
+
+    if opts.config:
+        global CONFIG
+        CONFIG = load_config(opts.config)
+    if opts.pdf is None:
+        opts.pdf = CONFIG.get("export_pdf", False)
 
     if not opts.email and not opts.username and not opts.phone:
         parser.error("il faut au moins un --email, --username ou --phone")
@@ -780,8 +1077,9 @@ def main(argv=None):
     companies = []
     phone_infos = []
     whois_results = []
+    reputation_results = []
 
-    with ThreadPoolExecutor(max_workers=6) as pool:
+    with ThreadPoolExecutor(max_workers=8) as pool:
         # Breach checks
         breach_futures = []
         if "breach" not in opts.skip:
@@ -805,6 +1103,22 @@ def main(argv=None):
             for email in opts.email:
                 whois_futures.append(pool.submit(run_whois_lookup, email, raw_dir))
 
+        # Email reputation
+        reputation_futures = []
+        if "reputation" not in opts.skip:
+            for email in opts.email:
+                reputation_futures.append(pool.submit(run_email_reputation, email, raw_dir))
+
+        # DNS enumeration on personal email domains
+        dns_futures = []
+        if "dns" not in opts.skip:
+            seen_domains = set()
+            for email in opts.email:
+                domain = email.split("@", 1)[1].lower()
+                if domain not in seen_domains:
+                    seen_domains.add(domain)
+                    dns_futures.append(pool.submit(run_dns_lookup, domain, raw_dir))
+
         for f in breach_futures:
             result = f.result()
             breaches.extend(result)
@@ -824,6 +1138,40 @@ def main(argv=None):
             whois_results.append(w)
             if w:
                 print(f"  [INFO] WHOIS {w['domain']} : domaine personnel detecte")
+
+        for f in reputation_futures:
+            rep = f.result()
+            reputation_results.append(rep)
+            if rep.get("error"):
+                print(f"  [INFO] Reputation {rep['email']} : indisponible")
+            else:
+                print(f"  [INFO] Reputation {rep['email']} : {rep.get('reputation', '?')}, suspect={rep.get('suspicious', '?')}")
+
+        dns_results = []
+        for f in dns_futures:
+            dr = f.result()
+            if dr:
+                dns_results.append(dr)
+                hints = ", ".join(dr.hosting_hints) if dr.hosting_hints else "aucun indice"
+                print(f"  [INFO] DNS {dr.domain} : MX={len(dr.mx_records)}, {hints}")
+
+    # Wayback Machine (runs after Phase 2 pool, uses profile URLs found)
+    wayback_results = []
+    if "wayback" not in opts.skip:
+        wb_urls = set()
+        for f in merge_findings(runs):
+            if f.url:
+                wb_urls.add(f.url)
+        if wb_urls:
+            print(f"  [INFO] Wayback Machine : verification de {len(wb_urls)} URL(s)...")
+            wayback_results = run_wayback_check(list(wb_urls)[:20], raw_dir)
+            archived = [r for r in wayback_results if r.total_snapshots > 0]
+            print(f"  [INFO] Wayback : {len(archived)}/{len(wayback_results)} URL(s) archivees")
+
+    # Paste / leak site URLs
+    paste_urls = []
+    if "paste" not in opts.skip:
+        paste_urls = build_paste_search_urls(opts.email, opts.username, opts.phone)
 
     # Phase 3: Build report
     print("[*] Phase 3 : generation du rapport...")
@@ -847,8 +1195,12 @@ def main(argv=None):
                 "entreprises": [asdict(c) for c in companies],
                 "telephones_info": [asdict(p) for p in phone_infos],
                 "whois": [w for w in whois_results if w],
+                "reputation": reputation_results,
+                "wayback": [asdict(w) for w in wayback_results],
+                "dns": [asdict(d) for d in dns_results],
                 "profil": profile_details,
                 "dorks": dorks,
+                "paste_urls": paste_urls,
             },
             indent=2, ensure_ascii=False,
         ),
@@ -856,12 +1208,31 @@ def main(argv=None):
     )
     report_file = report_dir / "RAPPORT.md"
     report_file.write_text(
-        render_report(opts, runs, findings, started, breaches, companies, phone_infos, whois_results, dorks, profile_details),
+        render_report(opts, runs, findings, started, breaches, companies, phone_infos, whois_results, dorks, profile_details,
+                      reputation_results=reputation_results, wayback_results=wayback_results,
+                      dns_results=dns_results, paste_urls=paste_urls),
         encoding="utf-8",
     )
 
     print(f"[*] Resultat : {len(findings)} comptes, {len(breaches)} fuites, {len(companies)} entreprises")
     print(f"[*] Rapport : {report_file}")
+
+    if opts.pdf:
+        try:
+            from scripts.pdf_export import convert as pdf_convert
+        except ImportError:
+            try:
+                pdf_dir = Path(__file__).resolve().parent
+                sys.path.insert(0, str(pdf_dir))
+                from pdf_export import convert as pdf_convert
+            except ImportError:
+                pdf_convert = None
+        if pdf_convert:
+            pdf_path = pdf_convert(report_file)
+            print(f"[*] PDF : {pdf_path}")
+        else:
+            print("[!] weasyprint non installe, PDF non genere (pip install weasyprint)")
+
     if runs and not any(run.ok for run in runs):
         sys.exit(1)
 
