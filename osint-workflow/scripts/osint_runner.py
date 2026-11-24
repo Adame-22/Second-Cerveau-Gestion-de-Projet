@@ -3,6 +3,7 @@
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import re
@@ -929,6 +930,110 @@ def compute_age(dob_str):
     except Exception:
         pass
     return None, None
+
+
+# --- Gravatar enrichment ---
+
+@dataclass
+class GravatarProfile:
+    email_hash: str
+    display_name: str = ""
+    about_me: str = ""
+    current_location: str = ""
+    profile_url: str = ""
+    urls: list = field(default_factory=list)
+    photos: list = field(default_factory=list)
+
+
+def run_gravatar_enrichment(email, raw_dir):
+    """Fetch Gravatar profile data from email hash (free, no API key)."""
+    work_dir = raw_dir / "gravatar"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    email_hash = hashlib.md5(email.strip().lower().encode()).hexdigest()
+    url = f"https://www.gravatar.com/{email_hash}.json"
+    data = http_get_json(url, timeout=10, retries=1)
+    if not data or "entry" not in data:
+        return None
+    entries = data.get("entry", [])
+    if not entries:
+        return None
+    entry = entries[0]
+    profile = GravatarProfile(
+        email_hash=email_hash,
+        display_name=entry.get("displayName", "") or "",
+        about_me=entry.get("aboutMe", "") or "",
+        current_location=entry.get("currentLocation", "") or "",
+        profile_url=entry.get("profileUrl", "") or "",
+        urls=[u.get("value", "") for u in entry.get("urls", []) if u.get("value")],
+        photos=[p.get("value", "") for p in entry.get("photos", []) if p.get("value")],
+    )
+    (work_dir / f"gravatar_{safe_name(email)}.json").write_text(
+        json.dumps(asdict(profile), indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    return profile
+
+
+# --- Telegram username check ---
+
+def check_telegram_username(username, raw_dir):
+    """Check if a Telegram username exists by probing t.me page."""
+    work_dir = raw_dir / "telegram"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    url = f"https://t.me/{urllib.parse.quote(username)}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+    except Exception:
+        return None
+    exists = "tgme_page_photo" in html or "tgme_page_title" in html
+    display_name = ""
+    if exists:
+        m = re.search(r'class="tgme_page_title[^"]*"[^>]*>\s*<span[^>]*>([^<]+)</span>', html)
+        if m:
+            display_name = m.group(1).strip()
+    result = {"username": username, "exists": exists, "display_name": display_name, "url": url}
+    (work_dir / f"telegram_{safe_name(username)}.json").write_text(
+        json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    return result if exists else None
+
+
+# --- Relationship graph (Mermaid) ---
+
+def build_relationship_graph(identity_card, findings, companies, github_profiles=None, breaches=None):
+    """Build a Mermaid graph showing connections between the person and discovered data."""
+    lines = ["graph LR"]
+    person_label = (identity_card or {}).get("nom", "Cible")
+    lines.append(f'    P["{person_label}"]')
+
+    account_count = 0
+    for f in (findings or []):
+        if f.source_tool in ("holehe", "sherlock", "maigret") and account_count < 15:
+            sid = f"A{account_count}"
+            site = f.site_name[:20] if f.site_name else f.url[:20] if f.url else "?"
+            lines.append(f'    P --> {sid}["{site}"]')
+            account_count += 1
+
+    for i, c in enumerate((companies or [])[:5]):
+        lines.append(f'    P --> C{i}["{c.company_name[:25]}"]')
+
+    if github_profiles:
+        for i, gp in enumerate(github_profiles[:3]):
+            if gp:
+                lines.append(f'    P --> GH{i}["GitHub: {gp.username[:20]}"]')
+
+    breach_count = 0
+    for b in (breaches or [])[:8]:
+        lines.append(f'    P --> B{breach_count}["{b.breach_name[:20]}"]:::breach')
+        breach_count += 1
+
+    if breach_count > 0:
+        lines.append("    classDef breach fill:#fee,stroke:#c00")
+
+    if len(lines) <= 2:
+        return None
+    return "\n".join(lines)
 
 
 # --- Username permutation generator ---
@@ -2189,7 +2294,7 @@ def parse_args(argv=None):
     parser.add_argument("--top-sites", type=int, default=500, help="Maigret : nombre de sites (defaut 500)")
     parser.add_argument("--skip", action="append", default=[],
                         choices=["holehe", "sherlock", "maigret", "breach", "company", "whois", "phone",
-                                 "reputation", "wayback", "dns", "paste", "social", "family", "crt", "github"],
+                                 "reputation", "wayback", "dns", "paste", "social", "family", "crt", "github", "gravatar", "telegram"],
                         help="Module a ne pas lancer (repetable)")
     parser.add_argument("--timeout", type=int, default=10, help="Timeout par requete (defaut 10)")
     parser.add_argument("--tool-timeout", type=int, default=1800, help="Duree max par outil (defaut 1800)")
@@ -2202,6 +2307,10 @@ def parse_args(argv=None):
                         help="Mode silencieux : supprime les messages de progression")
     parser.add_argument("--output-dir", "-o",
                         help="Repertoire de sortie personnalise (defaut : reports/<timestamp>_<mandat>)")
+    parser.add_argument("--encrypt-pdf", metavar="PASSWORD",
+                        help="Chiffrer le PDF avec ce mot de passe (necessite pikepdf)")
+    parser.add_argument("--xlsx", action="store_true",
+                        help="Generer un export Excel (.xlsx) en plus du CSV (necessite openpyxl)")
     opts = parser.parse_args(argv)
 
     if opts.config:
