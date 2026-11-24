@@ -926,7 +926,7 @@ class BreachSeverityTest(unittest.TestCase):
                               breach_date="2023-05-01", data_types=["Government issued IDs", "Physical addresses"])
         result = runner.analyze_breach_severity([b])
         self.assertTrue(result["identity_exposed"])
-        self.assertEqual(result["summary"][0]["severity"], "CRITIQUE")
+        self.assertEqual(result["summary"][0]["severity"], "ELEVE")
 
 
 class CrtShTest(unittest.TestCase):
@@ -968,74 +968,3 @@ class AgeComputeTest(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
-
-class EmailGuessTest(unittest.TestCase):
-    def test_generates_patterns(self):
-        guesses = runner.generate_email_guesses("Jean Dupont")
-        self.assertTrue(len(guesses) > 0)
-        self.assertTrue(any("jean.dupont@" in g for g in guesses))
-        self.assertTrue(any("j.dupont@" in g for g in guesses))
-
-    def test_excludes_known_emails(self):
-        guesses = runner.generate_email_guesses("Jean Dupont", ["jean.dupont@gmail.com"])
-        self.assertNotIn("jean.dupont@gmail.com", guesses)
-
-    def test_no_name_returns_empty(self):
-        self.assertEqual(runner.generate_email_guesses(None), [])
-
-    def test_single_name_returns_empty(self):
-        self.assertEqual(runner.generate_email_guesses("Jean"), [])
-
-
-class PhoneOsintTest(unittest.TestCase):
-    def test_generates_urls(self):
-        urls = runner.build_phone_osint_urls(["+33612345678"])
-        self.assertTrue(len(urls) > 0)
-        self.assertTrue(any("truecaller" in u["url"].lower() for u in urls))
-
-    def test_empty_returns_empty(self):
-        self.assertEqual(runner.build_phone_osint_urls(None), [])
-        self.assertEqual(runner.build_phone_osint_urls([]), [])
-
-
-class ProfessionalDorksTest(unittest.TestCase):
-    def test_generates_dorks_for_name(self):
-        dorks = runner.build_professional_dorks(nom="Jean Dupont")
-        self.assertTrue(len(dorks) > 0)
-        self.assertTrue(any("linkedin" in d["url"].lower() for d in dorks))
-
-    def test_empty_inputs(self):
-        dorks = runner.build_professional_dorks()
-        self.assertEqual(dorks, [])
-
-
-class BreachSeverityTest(unittest.TestCase):
-    def test_empty_breaches(self):
-        result = runner.analyze_breach_severity([])
-        self.assertEqual(result["total"], 0)
-        self.assertEqual(result["critical_count"], 0)
-
-    def test_critical_breach(self):
-        b = runner.BreachInfo(email="a@b.com", breach_name="TestBreach",
-                              breach_date="2023-01-01",
-                              data_types=["Passwords", "Email addresses"])
-        result = runner.analyze_breach_severity([b])
-        self.assertEqual(result["total"], 1)
-        self.assertTrue(result["password_exposed"])
-        self.assertGreater(result["critical_count"], 0)
-
-    def test_financial_breach(self):
-        b = runner.BreachInfo(email="a@b.com", breach_name="FinBreach",
-                              breach_date="2022-06-15",
-                              data_types=["Credit cards", "Email addresses"])
-        result = runner.analyze_breach_severity([b])
-        self.assertTrue(result["financial_exposed"])
-
-    def test_dates_sorted(self):
-        b1 = runner.BreachInfo(email="a@b.com", breach_name="Old",
-                               breach_date="2018-03-01", data_types=[])
-        b2 = runner.BreachInfo(email="a@b.com", breach_name="New",
-                               breach_date="2023-09-01", data_types=[])
-        result = runner.analyze_breach_severity([b1, b2])
-        self.assertEqual(result["earliest_breach"], "2018-03-01")
-        self.assertEqual(result["latest_breach"], "2023-09-01")

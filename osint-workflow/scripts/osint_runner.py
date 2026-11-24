@@ -1190,9 +1190,9 @@ def analyze_breach_severity(breaches):
 
         if is_critical:
             critical_count += 1
-            password_exposed = password_exposed or "Passwords" in types_set
-            financial_exposed = financial_exposed or is_financial
-            identity_exposed = identity_exposed or is_identity
+        password_exposed = password_exposed or "Passwords" in types_set
+        financial_exposed = financial_exposed or is_financial
+        identity_exposed = identity_exposed or is_identity
 
         severity = "CRITIQUE" if is_critical else ("ELEVE" if is_identity or is_financial else "MOYEN")
         summary.append({
@@ -1659,7 +1659,8 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
                    data_classification=None, dark_web_urls=None,
                    reverse_images=None, address_leaks=None, timeline=None,
                    crt_sh_results=None, github_profiles=None, age_info=None,
-                   email_guesses=None, phone_osint_urls=None, professional_dorks=None, breach_analysis=None):
+                   email_guesses=None, phone_osint_urls=None, professional_dorks=None, breach_analysis=None,
+                   gravatar_profiles=None, telegram_results=None, relationship_graph=None):
     by_kind = {"username": [], "email": []}
     for finding in findings:
         by_kind[finding.kind].append(finding)
@@ -2178,6 +2179,46 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
         for addr in _eg[:30]:
             out.append(f"- `{addr}`")
 
+    # --- Gravatar ---
+    if gravatar_profiles:
+        out += ["", S("Enrichissement Gravatar"), ""]
+        for gp in gravatar_profiles:
+            out.append(f"**Hash** : `{gp.email_hash}`")
+            if gp.display_name:
+                out.append(f"- **Nom affiche** : {gp.display_name}")
+            if gp.about_me:
+                out.append(f"- **Bio** : {gp.about_me}")
+            if gp.current_location:
+                out.append(f"- **Localisation** : {gp.current_location}")
+            if gp.profile_url:
+                out.append(f"- **Profil** : [{gp.profile_url}]({gp.profile_url})")
+            if gp.urls:
+                out.append("- **Liens associes** :")
+                for u in gp.urls:
+                    out.append(f"  - [{u}]({u})")
+            if gp.photos:
+                out.append(f"- **Photos** : {len(gp.photos)} photo(s) trouvee(s)")
+                for p in gp.photos[:3]:
+                    out.append(f"  - [{p}]({p})")
+            out.append("")
+
+    # --- Telegram ---
+    if telegram_results:
+        out += ["", S("Verification Telegram"), ""]
+        out.append("| Pseudo | Nom affiche | Lien |")
+        out.append("|---|---|---|")
+        for tr in telegram_results:
+            out.append(f"| @{tr['username']} | {tr.get('display_name', '')} | [{tr['url']}]({tr['url']}) |")
+
+    # --- Relationship graph ---
+    if relationship_graph:
+        out += ["", S("Graphe relationnel (Mermaid)"), ""]
+        out.append("*Diagramme des connexions identifiees (coller dans un rendu Mermaid ou mermaid.live) :*")
+        out.append("")
+        out.append("```mermaid")
+        out.append(relationship_graph)
+        out.append("```")
+
     # --- Action plan ---
     _rs = risk_score if risk_score is not None else 0
     out += ["", "---", "", "## Plan d'action", ""]
@@ -2432,6 +2473,17 @@ def main(argv=None):
             for username in opts.username:
                 github_futures.append(pool.submit(run_github_enrichment, username, raw_dir))
 
+        # Gravatar enrichment
+        gravatar_futures = []
+        if "gravatar" not in opts.skip:
+            for email in opts.email:
+                gravatar_futures.append(pool.submit(run_gravatar_enrichment, email, raw_dir))
+
+        # Telegram username check
+        telegram_futures = []
+        if "telegram" not in opts.skip:
+            for username in opts.username:
+                telegram_futures.append(pool.submit(check_telegram_username, username, raw_dir))
         for f in breach_futures:
             result = f.result()
             breaches.extend(result)
@@ -2482,6 +2534,19 @@ def main(argv=None):
                 github_profiles.append(gp)
                 log(f"  [INFO] GitHub @{gp.username} : {gp.public_repos} repos, {gp.followers} followers")
 
+        gravatar_profiles = []
+        for f in gravatar_futures:
+            gp = f.result()
+            if gp:
+                gravatar_profiles.append(gp)
+                log(f"  [INFO] Gravatar {gp.display_name or gp.email_hash[:8]} : {len(gp.urls)} lien(s), loc={gp.current_location or "?"}")
+
+        telegram_results = []
+        for f in telegram_futures:
+            tr = f.result()
+            if tr:
+                telegram_results.append(tr)
+                log(f"  [INFO] Telegram @{tr["username"]} : profil trouve ({tr.get("display_name", "")})")
     # Wayback Machine (runs after Phase 2 pool, uses profile URLs found)
     wayback_results = []
     if "wayback" not in opts.skip:
@@ -2535,6 +2600,8 @@ def main(argv=None):
     phone_osint_urls = build_phone_osint_urls(opts.phone)
     professional_dorks = build_professional_dorks(opts.nom, opts.email, opts.username)
     breach_analysis = analyze_breach_severity(breaches)
+    relationship_graph = build_relationship_graph(identity_card, findings, companies,
+                                                   github_profiles=github_profiles, breaches=breaches)
 
     elapsed = datetime.now() - started
 
@@ -2542,7 +2609,7 @@ def main(argv=None):
         json.dumps(
             {
                 "meta": {
-                    "version": "2.0.0",
+                    "version": "3.0.0",
                     "tool": "osint-workflow",
                     "duration_seconds": int(elapsed.total_seconds()),
                 },
@@ -2583,6 +2650,9 @@ def main(argv=None):
                 "professional_dorks": professional_dorks,
                 "breach_analysis": breach_analysis,
                 "age_info": {"age": age_info[0], "dob_iso": age_info[1]} if age_info[0] else None,
+                "gravatar": [asdict(g) for g in gravatar_profiles],
+                "telegram": telegram_results,
+                "relationship_graph": relationship_graph,
             },
             indent=2, ensure_ascii=False,
         ),
@@ -2605,7 +2675,9 @@ def main(argv=None):
                           crt_sh_results=crt_sh_results, github_profiles=github_profiles,
                           age_info=age_info,
                           email_guesses=email_guesses, phone_osint_urls=phone_osint_urls,
-                          professional_dorks=professional_dorks, breach_analysis=breach_analysis),
+                          professional_dorks=professional_dorks, breach_analysis=breach_analysis,
+                          gravatar_profiles=gravatar_profiles, telegram_results=telegram_results,
+                          relationship_graph=relationship_graph),
             encoding="utf-8",
         )
         log(f"[*] Rapport : {report_file}")

@@ -48,7 +48,7 @@ venv\Scripts\pip install -r requirements.txt
 | `--all-sites` / `--top-sites N` | Etendue de la recherche Maigret (defaut : top 500) |
 | `--prenom` | Prenom (ameliore les dorks famille/proches) |
 | `--dob JJ/MM/AAAA` | Date de naissance (active les dorks par age) |
-| `--skip OUTIL` | Ne pas lancer un module : `holehe`, `sherlock`, `maigret`, `breach`, `company`, `whois`, `phone`, `reputation`, `wayback`, `dns`, `paste`, `social`, `family` |
+| `--skip OUTIL` | Ne pas lancer un module : `holehe`, `sherlock`, `maigret`, `breach`, `company`, `whois`, `phone`, `reputation`, `wayback`, `dns`, `paste`, `social`, `family`, `crt`, `github` |
 | `--timeout`, `--tool-timeout` | Timeout par requete (10 s) et duree maximale par outil (1800 s) |
 | `--pdf` | Generer un export PDF en plus du Markdown (necessite `weasyprint`) |
 | `--json-only` | Generer uniquement `resultats.json` (pas de Markdown/PDF/CSV) |
@@ -63,8 +63,9 @@ Chaque audit cree `reports/<date>_<mandat>/` (jamais versionne) :
 - `RAPPORT.pdf` : version PDF professionnelle (si `--pdf`)
 - `resultats.json` : memes donnees, exploitables par un autre outil
 - `comptes.csv` : export tableur des comptes trouves
-- `resume.csv` : resume de l'audit
+- `resume.csv` : resume de l'audit (avec score et niveau de risque)
 - `fuites.csv` : detail des fuites (si trouvees)
+- `entreprises.csv` : entreprises liees (si trouvees)
 - `brut/` : journaux et exports de chaque outil
 
 ### Sections du rapport
@@ -94,7 +95,14 @@ Chaque audit cree `reports/<date>_<mandat>/` (jamais versionne) :
 23. **Recherche inverse d'image** : Google Lens, TinEye, Yandex pour les avatars Gravatar/GitHub
 24. **Bases de fuites** : liens vers HIBP, DeHashed, LeakCheck, IntelX, Snusbase, Truecaller
 25. **Correlations** : croisement des identites entre toutes les sources
-26. **Plan d'action** : recommandations priorisees
+26. **Analyse de severite des fuites** : criticite par fuite (mots de passe, donnees financieres, identite)
+27. **Dorks professionnels** : LinkedIn, Societe.com, Infogreffe, Malt, Wellfound, Glassdoor, etc.
+28. **OSINT telephone** : liens Truecaller, Sync.me, PagesJaunes, Tellows, NumeroInverse, etc.
+29. **Hypotheses email** : variantes email generees a partir du nom (non verifiees, pistes)
+30. **Certificats SSL** : transparence des certificats via crt.sh (sous-domaines, historique)
+31. **Profils GitHub** : repos, followers, bio, localisation, entreprise
+32. **Age calcule** : a partir de la date de naissance fournie
+33. **Plan d'action** : recommandations priorisees
 
 ## Modules d'investigation
 
@@ -121,6 +129,13 @@ Chaque audit cree `reports/<date>_<mandat>/` (jamais versionne) :
 | Detection adresses | Toutes sources | Localisation geographique exposee |
 | Dark web check | Tous | Liens de verification manuelle sur bases de fuites |
 | Reverse image | Pseudo/Email | Recherche d'image inversee (Gravatar, GitHub) via Google Lens, TinEye, Yandex |
+| crt.sh | Email (domaines) | Certificats SSL, sous-domaines, historique via Certificate Transparency |
+| GitHub enrichment | Pseudo | Repos publics, followers, bio, localisation, entreprise, blog |
+| Email guessing | Nom | Generation de variantes email probables (prenom.nom, p.nom, etc.) |
+| Phone OSINT | Telephone | URLs Truecaller, Sync.me, PagesJaunes, Tellows, NumeroInverse, 118712 |
+| Professional dorks | Nom/Email/Pseudo | Dorks LinkedIn, Societe.com, Infogreffe, Malt, Glassdoor, Viadeo |
+| Breach severity | Fuites | Analyse de criticite : mots de passe, donnees financieres, identite |
+| Age compute | Date naissance | Calcul de l'age a partir de la date de naissance (JJ/MM/AAAA) |
 
 Les scans de la phase 1 (comptes) et de la phase 2 (analyse approfondie) tournent en parallele.
 
@@ -133,6 +148,7 @@ Copier `config.example.json` en `config.json` :
     "hibp_api_key": "",
     "intelx_api_key": "",
     "emailrep_api_key": "",
+    "opencorporates_api_key": "",
     "export_pdf": true,
     "default_top_sites": 500,
     "default_timeout": 10,
@@ -141,6 +157,7 @@ Copier `config.example.json` en `config.json` :
 ```
 
 Aucune cle n'est obligatoire. Sans cle HIBP, le systeme utilise h8mail en fallback.
+Sans cle OpenCorporates, la recherche d'entreprises internationales est desactivee (Pappers.fr reste actif).
 
 ## Cadre
 
