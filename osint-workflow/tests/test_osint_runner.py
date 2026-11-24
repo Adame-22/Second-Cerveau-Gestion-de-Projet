@@ -1118,16 +1118,20 @@ class RelationshipGraphTest(unittest.TestCase):
         ]
         result = runner.build_relationship_graph({"nom": "Jean Dupont"}, findings, [])
         self.assertIsNotNone(result)
-        self.assertIn("graph LR", result)
-        self.assertIn("Jean Dupont", result)
-        self.assertIn("Twitter", result)
+        self.assertIn("nodes", result)
+        self.assertIn("edges", result)
+        labels = [n["label"] for n in result["nodes"]]
+        self.assertIn("Jean Dupont", labels)
+        self.assertTrue(any("Twitter" in l for l in labels))
 
     def test_includes_breaches(self):
         breaches = [runner.BreachInfo(email="a@b.com", breach_name="LinkedIn",
                                       breach_date="2012-05-05", data_types=["Passwords"])]
         result = runner.build_relationship_graph({"nom": "Test"}, [], [], breaches=breaches)
-        self.assertIn("LinkedIn", result)
-        self.assertIn("classDef breach", result)
+        labels = [n["label"] for n in result["nodes"]]
+        self.assertTrue(any("LinkedIn" in l for l in labels))
+        types = [n["type"] for n in result["nodes"]]
+        self.assertIn("breach", types)
 
 
 class SkipNewModules2Test(unittest.TestCase):
@@ -1234,3 +1238,182 @@ class TestDigitalFootprint(unittest.TestCase):
             findings, breaches=breaches, github_profiles=[gp])
         leak_cat = [c for c in result["category_details"] if c["category"] == "Fuites de donnees"][0]
         self.assertEqual(leak_cat["count"], 1)
+
+
+class TestEmailPatterns(unittest.TestCase):
+    def test_empty(self):
+        result = runner.analyze_email_patterns([])
+        self.assertEqual(result["email_profiles"], [])
+
+    def test_personal_gmail(self):
+        result = runner.analyze_email_patterns(["john@gmail.com"])
+        self.assertEqual(len(result["email_profiles"]), 1)
+        self.assertEqual(result["email_profiles"][0]["type"], "personnel")
+        self.assertFalse(result["email_profiles"][0]["disposable"])
+
+    def test_disposable(self):
+        result = runner.analyze_email_patterns(["anon@yopmail.com"])
+        self.assertEqual(result["email_profiles"][0]["type"], "jetable")
+        self.assertTrue(result["email_profiles"][0]["disposable"])
+
+    def test_corporate_match(self):
+        result = runner.analyze_email_patterns(["jean.dupont@acme.com"], nom="Jean Dupont")
+        self.assertEqual(result["email_profiles"][0]["type"], "professionnel")
+        self.assertTrue(result["email_profiles"][0]["corporate_match"])
+
+    def test_corporate_no_match(self):
+        result = runner.analyze_email_patterns(["contact@acme.com"], nom="Jean Dupont")
+        self.assertFalse(result["email_profiles"][0]["corporate_match"])
+
+
+class TestUsernameIntelligence(unittest.TestCase):
+    def test_empty(self):
+        result = runner.generate_username_intelligence([])
+        self.assertEqual(result["patterns"], [])
+        self.assertEqual(result["insights"], [])
+
+    def test_year_pattern(self):
+        findings = [runner.Finding("john92", "username", "Twitter", sources=["sherlock"])]
+        result = runner.generate_username_intelligence(findings)
+        self.assertTrue(any(p["pattern"] == "year_hint" for p in result["patterns"]))
+        self.assertTrue(any("1992" in i for i in result["insights"]))
+
+    def test_location_pattern(self):
+        findings = [runner.Finding("jean_paris", "username", "Instagram", sources=["sherlock"])]
+        result = runner.generate_username_intelligence(findings)
+        self.assertTrue(any(p["pattern"] == "location_hint" for p in result["patterns"]))
+
+    def test_reuse_detection(self):
+        findings = [
+            runner.Finding("jdupont", "username", "Twitter", sources=["sherlock"]),
+            runner.Finding("jdupont", "username", "GitHub", sources=["sherlock"]),
+            runner.Finding("jdupont", "username", "Reddit", sources=["sherlock"]),
+        ]
+        result = runner.generate_username_intelligence(findings)
+        self.assertIn("jdupont", result["reuse_map"])
+        self.assertEqual(len(result["reuse_map"]["jdupont"]), 3)
+        self.assertTrue(any("reutilise" in i for i in result["insights"]))
+
+
+class TestPasswordCheckSection(unittest.TestCase):
+    def test_structure(self):
+        result = runner.build_password_check_section()
+        self.assertIn("api_url", result)
+        self.assertIn("check_url", result)
+        self.assertIn("explanation", result)
+        self.assertIn("steps", result)
+        self.assertIn("k-anonymite", result["explanation"])
+        self.assertEqual(len(result["steps"]), 4)
+
+
+class TestRenderMermaidGraph(unittest.TestCase):
+    def test_none_input(self):
+        self.assertEqual(runner.render_mermaid_graph(None), [])
+        self.assertEqual(runner.render_mermaid_graph({}), [])
+        self.assertEqual(runner.render_mermaid_graph({"nodes": []}), [])
+
+    def test_basic_graph(self):
+        graph = {
+            "nodes": [
+                {"id": "P", "label": "Jean Dupont", "type": "identity"},
+                {"id": "A0", "label": "Facebook", "type": "account"},
+                {"id": "C0", "label": "ACME Corp", "type": "company"},
+            ],
+            "edges": [
+                {"from": "P", "to": "A0", "label": "compte"},
+                {"from": "P", "to": "C0", "label": "dirigeant"},
+            ],
+        }
+        lines = runner.render_mermaid_graph(graph)
+        text = "\n".join(lines)
+        self.assertIn("graph LR", text)
+        self.assertIn('P(("Jean Dupont"))', text)
+        self.assertIn('A0["Facebook"]', text)
+        self.assertIn('C0{{"ACME Corp"}}', text)
+        self.assertIn("-->|compte|", text)
+        self.assertIn("-->|dirigeant|", text)
+        self.assertIn("classDef breach", text)
+
+    def test_breach_and_github_classes(self):
+        graph = {
+            "nodes": [
+                {"id": "P", "label": "Target", "type": "identity"},
+                {"id": "B0", "label": "Adobe2013", "type": "breach"},
+                {"id": "GH0", "label": "GitHub: dev42", "type": "github"},
+            ],
+            "edges": [
+                {"from": "P", "to": "B0", "label": "fuite"},
+                {"from": "P", "to": "GH0", "label": "profil"},
+            ],
+        }
+        lines = runner.render_mermaid_graph(graph)
+        text = "\n".join(lines)
+        self.assertIn(":::breach", text)
+        self.assertIn(":::github", text)
+        self.assertIn('B0["Adobe2013"]:::breach', text)
+        self.assertIn('GH0(["GitHub: dev42"]):::github', text)
+
+    def test_build_returns_structured(self):
+        identity = {"nom": "Test User", "emails": ["test@example.com"]}
+        findings = [runner.Finding("test@example.com", "email", "Spotify", sources=["holehe"])]
+        companies = [runner.CompanyInfo("ACME")]
+        result = runner.build_relationship_graph(identity, findings, companies)
+        self.assertIsNotNone(result)
+        self.assertIn("nodes", result)
+        self.assertIn("edges", result)
+        types = {n["type"] for n in result["nodes"]}
+        self.assertIn("identity", types)
+        self.assertIn("email", types)
+        self.assertIn("account", types)
+        self.assertIn("company", types)
+
+
+class TestExecutiveSummary(unittest.TestCase):
+    def test_empty_data_faible(self):
+        result = runner.generate_executive_summary([], [], [], [], [])
+        self.assertIn("faible", result["headline"].lower())
+        self.assertEqual(result["exposure_metrics"]["accounts_count"], 0)
+        self.assertEqual(result["exposure_metrics"]["breaches_count"], 0)
+        self.assertEqual(result["exposure_metrics"]["password_breaches"], 0)
+        self.assertIn("Aucune fuite de mot de passe detectee", result["positive_findings"])
+        self.assertIn("Aucune fuite de donnees connue", result["positive_findings"])
+        self.assertEqual(result["immediate_risks"], [])
+
+    def test_critique_with_password_breaches(self):
+        breaches = [
+            runner.BreachInfo("a@b.com", "Leak1", data_types=["Passwords", "Email addresses"]),
+            runner.BreachInfo("a@b.com", "Leak2", data_types=["Passwords", "Credit cards"]),
+        ]
+        result = runner.generate_executive_summary(
+            [], breaches, [], [], [],
+            risk_level="CRITIQUE",
+            breach_analysis={"password_exposed": True, "financial_exposed": True})
+        self.assertIn("CRITIQUE", result["headline"])
+        self.assertEqual(result["exposure_metrics"]["password_breaches"], 2)
+        self.assertEqual(result["exposure_metrics"]["breaches_count"], 2)
+        self.assertTrue(any("mots de passe" in kf.lower() or "mot de passe" in kf.lower() for kf in result["key_findings"]))
+        self.assertTrue(any("financier" in kf.lower() or "Donnees financieres" in kf for kf in result["key_findings"]))
+        self.assertTrue(len(result["immediate_risks"]) > 0)
+
+    def test_key_findings_capped_at_5(self):
+        findings = [runner.Finding(f"user{i}", "username", f"Site{i}", sources=["sherlock"]) for i in range(30)]
+        breaches = [
+            runner.BreachInfo("a@b.com", "Leak1", data_types=["Passwords"]),
+            runner.BreachInfo("a@b.com", "Leak2", data_types=["Credit cards"]),
+        ]
+        companies = [runner.CompanyInfo("ACME", siren="123", address="1 rue test")]
+        result = runner.generate_executive_summary(
+            findings, breaches, companies, [], [],
+            breach_analysis={"financial_exposed": True, "identity_exposed": True},
+            address_leaks=["some address"],
+            risk_level="CRITIQUE")
+        self.assertLessEqual(len(result["key_findings"]), 5)
+        self.assertLessEqual(len(result["immediate_risks"]), 3)
+
+    def test_positive_findings_no_breaches(self):
+        findings = [runner.Finding("user1", "username", "GitHub", sources=["sherlock"])]
+        result = runner.generate_executive_summary(findings, [], [], [], [])
+        self.assertIn("Aucune fuite de mot de passe detectee", result["positive_findings"])
+        self.assertIn("Aucune fuite de donnees connue", result["positive_findings"])
+        self.assertIn("Aucune entreprise liee trouvee dans les registres publics", result["positive_findings"])
+        self.assertIn("Surface d'attaque limitee avec peu de comptes en ligne", result["positive_findings"])
