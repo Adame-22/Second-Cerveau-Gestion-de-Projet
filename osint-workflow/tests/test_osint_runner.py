@@ -965,6 +965,191 @@ class AgeComputeTest(unittest.TestCase):
         self.assertIsNone(age)
 
 
+class DataBrokerTest(unittest.TestCase):
+    def test_generates_urls_for_name(self):
+        urls = runner.build_data_broker_urls("Jean Dupont")
+        self.assertTrue(len(urls) >= 8)
+        brokers = {u["broker"] for u in urls}
+        self.assertIn("Pages Blanches", brokers)
+        self.assertIn("Spokeo", brokers)
+
+    def test_includes_removal_urls(self):
+        urls = runner.build_data_broker_urls("Jean Dupont")
+        for u in urls:
+            self.assertIn("removal_url", u)
+            self.assertTrue(u["removal_url"].startswith("http"))
+
+    def test_empty_returns_empty(self):
+        self.assertEqual(runner.build_data_broker_urls(), [])
+
+    def test_email_adds_hibp(self):
+        urls = runner.build_data_broker_urls(emails=["test@example.com"])
+        brokers = {u["broker"] for u in urls}
+        self.assertIn("HaveIBeenPwned", brokers)
+
+
+class SocialEngineeringRiskTest(unittest.TestCase):
+    def test_empty_data(self):
+        result = runner.assess_social_engineering_risk({}, [], [], [], [])
+        self.assertEqual(result["risk_level"], "FAIBLE")
+        self.assertEqual(result["attack_vectors"], [])
+
+    def test_critical_with_many_vectors(self):
+        card = {"nom": "Jean Dupont", "date_naissance": "01/01/2000", "localisation": "Paris",
+                "profession": "Dev"}
+        breaches = [
+            runner.BreachInfo("a@b.com", "B1", "2024-01-01", ["Passwords"]),
+            runner.BreachInfo("a@b.com", "B2", "2024-01-01", ["Physical addresses"]),
+            runner.BreachInfo("a@b.com", "B3", "2024-01-01", ["Phone numbers"]),
+        ]
+        companies = [runner.CompanyInfo(name="ACME", address="123 Rue")]
+        result = runner.assess_social_engineering_risk(card, breaches, companies, [], [])
+        self.assertIn(result["risk_level"], ("CRITIQUE", "ELEVE"))
+        self.assertTrue(len(result["attack_vectors"]) > 2)
+
+    def test_includes_recommendations(self):
+        card = {"nom": "Test"}
+        b = runner.BreachInfo("a@b.com", "B1", "2024-01-01", ["Passwords"])
+        result = runner.assess_social_engineering_risk(card, [b], [], [], [])
+        self.assertTrue(len(result["recommendations"]) > 0)
+
+
+class ActionPrioritiesTest(unittest.TestCase):
+    def test_empty_data(self):
+        result = runner.generate_action_priorities([], [], [], [], [], [], {}, 0)
+        self.assertIn("urgent", result)
+        self.assertIn("recommended", result)
+
+    def test_password_breach_urgent(self):
+        b = runner.BreachInfo("a@b.com", "Test", "2024-01-01", ["Passwords"])
+        result = runner.generate_action_priorities([b], [], [], [], [], [], {}, 50)
+        self.assertTrue(any("mot de passe" in a.lower() or "password" in a.lower() for a in result["urgent"]))
+
+    def test_monitoring_always_recommended(self):
+        result = runner.generate_action_priorities([], [], [], [], [], [], {}, 0)
+        self.assertTrue(any("monitoring" in r.lower() or "HIBP" in r for r in result["recommended"]))
+
+
 if __name__ == "__main__":
     unittest.main()
 
+class GravatarTest(unittest.TestCase):
+    def test_dataclass_defaults(self):
+        gp = runner.GravatarProfile(email_hash="abc123")
+        self.assertEqual(gp.email_hash, "abc123")
+        self.assertEqual(gp.display_name, "")
+        self.assertEqual(gp.urls, [])
+        self.assertEqual(gp.photos, [])
+
+    def test_returns_none_on_no_data(self):
+        with patch("osint_runner.http_get_json", return_value=None):
+            result = runner.run_gravatar_enrichment("test@example.com", Path(tempfile.mkdtemp()))
+        self.assertIsNone(result)
+
+    def test_returns_none_on_empty_entry(self):
+        with patch("osint_runner.http_get_json", return_value={"entry": []}):
+            result = runner.run_gravatar_enrichment("test@example.com", Path(tempfile.mkdtemp()))
+        self.assertIsNone(result)
+
+    def test_parses_gravatar_response(self):
+        mock_data = {
+            "entry": [{
+                "displayName": "John Doe",
+                "aboutMe": "Developer",
+                "currentLocation": "Paris",
+                "profileUrl": "https://gravatar.com/johndoe",
+                "urls": [{"value": "https://example.com"}],
+                "photos": [{"value": "https://gravatar.com/avatar/abc"}],
+            }]
+        }
+        with patch("osint_runner.http_get_json", return_value=mock_data):
+            result = runner.run_gravatar_enrichment("john@example.com", Path(tempfile.mkdtemp()))
+        self.assertIsNotNone(result)
+        self.assertEqual(result.display_name, "John Doe")
+        self.assertEqual(result.current_location, "Paris")
+        self.assertEqual(len(result.urls), 1)
+
+    def test_hash_computation(self):
+        import hashlib
+        mock_data = {"entry": [{"displayName": "X"}]}
+        with patch("osint_runner.http_get_json", return_value=mock_data) as mock_get:
+            runner.run_gravatar_enrichment("Test@Example.COM", Path(tempfile.mkdtemp()))
+        expected_hash = hashlib.md5(b"test@example.com").hexdigest()
+        self.assertIn(expected_hash, mock_get.call_args[0][0])
+
+
+class TelegramCheckTest(unittest.TestCase):
+    def test_returns_none_on_error(self):
+        with patch("urllib.request.urlopen", side_effect=Exception("timeout")):
+            result = runner.check_telegram_username("testuser", Path(tempfile.mkdtemp()))
+        self.assertIsNone(result)
+
+    def test_returns_none_when_not_found(self):
+        mock_resp = unittest.mock.MagicMock()
+        mock_resp.read.return_value = b"<html>If you have Telegram, open it</html>"
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = lambda s, *a: None
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            result = runner.check_telegram_username("nonexistent", Path(tempfile.mkdtemp()))
+        self.assertIsNone(result)
+
+    def test_detects_existing_profile(self):
+        html = b'<div class="tgme_page_photo"><img></div><div class="tgme_page_title"><span>Alice</span></div>'
+        mock_resp = unittest.mock.MagicMock()
+        mock_resp.read.return_value = html
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = lambda s, *a: None
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            result = runner.check_telegram_username("alice", Path(tempfile.mkdtemp()))
+        self.assertIsNotNone(result)
+        self.assertTrue(result["exists"])
+        self.assertEqual(result["username"], "alice")
+
+
+class RelationshipGraphTest(unittest.TestCase):
+    def test_returns_none_with_no_data(self):
+        result = runner.build_relationship_graph({}, [], [])
+        self.assertIsNone(result)
+
+    def test_builds_graph_with_findings(self):
+        findings = [
+            runner.Finding(kind="username", identifier="user1", site="Twitter",
+                           url="https://twitter.com/user1", sources=["sherlock"]),
+        ]
+        result = runner.build_relationship_graph({"nom": "Jean Dupont"}, findings, [])
+        self.assertIsNotNone(result)
+        self.assertIn("graph LR", result)
+        self.assertIn("Jean Dupont", result)
+        self.assertIn("Twitter", result)
+
+    def test_includes_breaches(self):
+        breaches = [runner.BreachInfo(email="a@b.com", breach_name="LinkedIn",
+                                      breach_date="2012-05-05", data_types=["Passwords"])]
+        result = runner.build_relationship_graph({"nom": "Test"}, [], [], breaches=breaches)
+        self.assertIn("LinkedIn", result)
+        self.assertIn("classDef breach", result)
+
+
+class SkipNewModules2Test(unittest.TestCase):
+    def test_skip_gravatar(self):
+        opts = runner.parse_args(["-m", "M1", "-e", "a@b.com", "--skip", "gravatar"])
+        self.assertIn("gravatar", opts.skip)
+
+    def test_skip_telegram(self):
+        opts = runner.parse_args(["-m", "M1", "-e", "a@b.com", "--skip", "telegram"])
+        self.assertIn("telegram", opts.skip)
+
+    def test_encrypt_pdf_flag(self):
+        opts = runner.parse_args(["-m", "M1", "-e", "a@b.com", "--encrypt-pdf", "secret123"])
+        self.assertEqual(opts.encrypt_pdf, "secret123")
+
+    def test_xlsx_flag(self):
+        opts = runner.parse_args(["-m", "M1", "-e", "a@b.com", "--xlsx"])
+        self.assertTrue(opts.xlsx)
+
+
+class XlsxExportTest(unittest.TestCase):
+    def test_module_syntax(self):
+        import ast
+        path = Path(__file__).resolve().parent.parent / "scripts" / "xlsx_export.py"
+        ast.parse(path.read_text(encoding="utf-8"))

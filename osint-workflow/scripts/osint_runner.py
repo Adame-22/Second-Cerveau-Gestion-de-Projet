@@ -1009,14 +1009,15 @@ def build_relationship_graph(identity_card, findings, companies, github_profiles
 
     account_count = 0
     for f in (findings or []):
-        if f.source_tool in ("holehe", "sherlock", "maigret") and account_count < 15:
+        tool = f.sources[0] if f.sources else ""
+        if tool in ("holehe", "sherlock", "maigret") and account_count < 15:
             sid = f"A{account_count}"
-            site = f.site_name[:20] if f.site_name else f.url[:20] if f.url else "?"
+            site = f.site[:20] if f.site else f.url[:20] if f.url else "?"
             lines.append(f'    P --> {sid}["{site}"]')
             account_count += 1
 
     for i, c in enumerate((companies or [])[:5]):
-        lines.append(f'    P --> C{i}["{c.company_name[:25]}"]')
+        lines.append(f'    P --> C{i}["{c.name[:25]}"]')
 
     if github_profiles:
         for i, gp in enumerate(github_profiles[:3]):
@@ -1626,6 +1627,185 @@ def build_dark_web_check_urls(emails=None, usernames=None, phones=None):
     return urls
 
 
+def build_data_broker_urls(nom=None, emails=None, phones=None):
+    """Generate data broker check and removal URLs."""
+    urls = []
+    brokers = [
+        {"name": "Pages Blanches", "region": "FR",
+         "search": "https://www.pagesjaunes.fr/pagesblanches/recherche?quoiqui={name}",
+         "removal": "https://www.pagesjaunes.fr/contact"},
+        {"name": "118712", "region": "FR",
+         "search": "https://www.118712.fr/{name}",
+         "removal": "https://www.118712.fr/contact"},
+        {"name": "Infobel", "region": "INT",
+         "search": "https://www.infobel.com/fr/france/name/{name}",
+         "removal": "https://www.infobel.com/fr/contact"},
+        {"name": "Spokeo", "region": "US",
+         "search": "https://www.spokeo.com/{name}",
+         "removal": "https://www.spokeo.com/optout"},
+        {"name": "BeenVerified", "region": "US",
+         "search": "https://www.beenverified.com/people/{name}/",
+         "removal": "https://www.beenverified.com/faq/opt-out/"},
+        {"name": "Whitepages", "region": "US",
+         "search": "https://www.whitepages.com/name/{name}",
+         "removal": "https://www.whitepages.com/suppression-requests"},
+        {"name": "AnyWho", "region": "US",
+         "search": "https://www.anywho.com/people/{name}",
+         "removal": "https://www.anywho.com/help"},
+        {"name": "ThatsThem", "region": "US",
+         "search": "https://thatsthem.com/name/{name}",
+         "removal": "https://thatsthem.com/optout"},
+        {"name": "Pipl", "region": "INT",
+         "search": "https://pipl.com/search/?q={name}",
+         "removal": "https://pipl.com/help/remove/"},
+        {"name": "FastPeopleSearch", "region": "US",
+         "search": "https://www.fastpeoplesearch.com/name/{name}",
+         "removal": "https://www.fastpeoplesearch.com/removal"},
+    ]
+    if nom:
+        slug = nom.lower().replace(" ", "-")
+        q = urllib.parse.quote(nom)
+        for b in brokers:
+            url_name = slug if "{name}" in b["search"] else q
+            urls.append({
+                "broker": b["name"],
+                "region": b["region"],
+                "search_url": b["search"].replace("{name}", url_name),
+                "removal_url": b["removal"],
+            })
+    if emails:
+        for email in emails:
+            q = urllib.parse.quote(email)
+            urls.append({"broker": "HaveIBeenPwned", "region": "INT",
+                         "search_url": f"https://haveibeenpwned.com/account/{q}",
+                         "removal_url": "https://haveibeenpwned.com/FAQs"})
+            urls.append({"broker": "DeHashed", "region": "INT",
+                         "search_url": f"https://www.dehashed.com/search?query={q}",
+                         "removal_url": "https://www.dehashed.com"})
+    return urls
+
+
+def assess_social_engineering_risk(identity_card, breaches, companies, findings, profile_details,
+                                    whois_results=None, phone_infos=None):
+    """Assess social engineering risk from all collected data."""
+    exposed_info = []
+    attack_vectors = []
+    security_questions_at_risk = []
+    recommendations = []
+
+    card = identity_card or {}
+    if card.get("nom"):
+        exposed_info.append(("Nom complet", "ELEVE"))
+    if card.get("date_naissance"):
+        exposed_info.append(("Date de naissance", "CRITIQUE"))
+        security_questions_at_risk.append("Date de naissance")
+    if card.get("localisation"):
+        exposed_info.append(("Localisation", "ELEVE"))
+        security_questions_at_risk.append("Ville de naissance / residence")
+    if card.get("profession"):
+        exposed_info.append(("Profession/Employeur", "MOYEN"))
+        security_questions_at_risk.append("Nom de l'employeur")
+
+    for c in companies:
+        if c.name:
+            exposed_info.append((f"Entreprise : {c.name}", "ELEVE"))
+            attack_vectors.append(f"Usurpation d'identite professionnelle via {c.name}")
+
+    for b in breaches:
+        if "Passwords" in b.data_types:
+            attack_vectors.append(f"Credential stuffing (mot de passe fuite dans {b.breach_name})")
+        if "Security questions and answers" in b.data_types:
+            security_questions_at_risk.append(f"Questions de securite fuites dans {b.breach_name}")
+        if "Physical addresses" in b.data_types:
+            exposed_info.append(("Adresse physique (fuite)", "CRITIQUE"))
+            attack_vectors.append("Phishing cible avec adresse reelle")
+        if "Phone numbers" in b.data_types:
+            attack_vectors.append("SIM swapping / vishing")
+
+    for w in (whois_results or []):
+        if w.get("registrant_name") or w.get("registrant_organization"):
+            exposed_info.append(("WHOIS : identite du proprietaire", "ELEVE"))
+            attack_vectors.append("Contact via domaine personnel (pretexte technique)")
+            break
+
+    n_accounts = len(findings)
+    if n_accounts > 20:
+        attack_vectors.append(f"Large surface d'attaque : {n_accounts} comptes identifies")
+
+    if profile_details:
+        for p in profile_details:
+            if p.get("bio"):
+                exposed_info.append(("Bio publique", "FAIBLE"))
+                break
+
+    if exposed_info:
+        recommendations.append("Activer l'authentification a deux facteurs (2FA) sur tous les comptes critiques")
+    if any(s == "CRITIQUE" for _, s in exposed_info):
+        recommendations.append("Contacter les services concernes pour retirer les informations critiques exposees")
+    if security_questions_at_risk:
+        recommendations.append("Changer les questions de securite qui reposent sur des informations publiques")
+    if attack_vectors:
+        recommendations.append("Former le client a reconnaitre les tentatives de phishing et vishing")
+    if companies:
+        recommendations.append("Alerter les entreprises liees du risque d'usurpation d'identite")
+    recommendations.append("Surveiller regulierement les nouvelles fuites via HIBP ou un service de monitoring")
+
+    risk_level = "CRITIQUE" if len(attack_vectors) > 5 else "ELEVE" if len(attack_vectors) > 2 else "MOYEN" if attack_vectors else "FAIBLE"
+
+    return {
+        "risk_level": risk_level,
+        "exposed_info": exposed_info,
+        "attack_vectors": attack_vectors,
+        "security_questions_at_risk": security_questions_at_risk,
+        "recommendations": recommendations,
+    }
+
+
+def generate_action_priorities(breaches, findings, companies, whois_results, reputation_results,
+                                address_leaks, data_classification, risk_score):
+    """Generate prioritized action plan based on all findings."""
+    urgent = []
+    important = []
+    recommended = []
+
+    for b in breaches:
+        if "Passwords" in b.data_types:
+            urgent.append(f"Changer immediatement le mot de passe associe a {b.email} (fuite : {b.breach_name})")
+    if breaches:
+        urgent.append("Activer l'authentification a deux facteurs (2FA) sur tous les comptes identifies")
+
+    pw_breaches = [b for b in breaches if "Passwords" in b.data_types]
+    if pw_breaches:
+        urgent.append("Verifier qu'aucun mot de passe fuite n'est reutilise sur d'autres comptes")
+
+    for w in (whois_results or []):
+        if w.get("registrant_name") or w.get("registrant_organization"):
+            important.append(f"Activer la protection WHOIS Privacy sur le domaine {w.get('domain', 'inconnu')}")
+
+    if address_leaks:
+        important.append("Contacter les services exposant l'adresse physique pour demander le retrait")
+
+    for c in companies:
+        if c.address:
+            important.append(f"Verifier que l'adresse du siege de {c.name} ne correspond pas a l'adresse personnelle")
+
+    critical_data = data_classification.get("CRITIQUE", []) if data_classification else []
+    if critical_data:
+        for item in critical_data[:3]:
+            important.append(f"Traiter l'exposition de donnees critiques : {item.get('type', 'inconnu')} (source : {item.get('source', 'inconnue')})")
+
+    n_accounts = len(findings)
+    if n_accounts > 10:
+        recommended.append(f"Auditer les parametres de confidentialite des {n_accounts} comptes identifies")
+    recommended.append("Mettre en place un monitoring continu des fuites (HIBP, Firefox Monitor)")
+    recommended.append("Supprimer les comptes inutilises pour reduire la surface d'attaque")
+    if reputation_results:
+        for rep in reputation_results:
+            if rep.get("suspicious"):
+                recommended.append(f"Investiguer la reputation suspecte de {rep.get('email', 'email')}")
+
+    return {"urgent": urgent, "important": important, "recommended": recommended}
+
 
 def build_phone_osint_urls(phones=None):
     """Generate phone OSINT investigation URLs."""
@@ -1660,7 +1840,8 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
                    reverse_images=None, address_leaks=None, timeline=None,
                    crt_sh_results=None, github_profiles=None, age_info=None,
                    email_guesses=None, phone_osint_urls=None, professional_dorks=None, breach_analysis=None,
-                   gravatar_profiles=None, telegram_results=None, relationship_graph=None):
+                   gravatar_profiles=None, telegram_results=None, relationship_graph=None,
+                   data_broker_urls=None, social_engineering_risk=None, action_priorities=None):
     by_kind = {"username": [], "email": []}
     for finding in findings:
         by_kind[finding.kind].append(finding)
@@ -2219,6 +2400,48 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
         out.append(relationship_graph)
         out.append("```")
 
+    # --- Data broker exposure ---
+    if data_broker_urls:
+        out += ["", "---", "", "## Exposition courtiers de donnees", ""]
+        out.append("Verifier la presence du sujet sur ces plateformes et demander le retrait si necessaire :")
+        out.append("")
+        out.append("| Courtier | Region | Lien de recherche | Demande de retrait |")
+        out.append("|---|---|---|---|")
+        for db in data_broker_urls:
+            out.append(f"| {cell(db['broker'])} | {cell(db['region'])} | [Rechercher]({db['search_url']}) | [Retrait]({db['removal_url']}) |")
+        out.append("")
+
+    # --- Social engineering risk ---
+    if social_engineering_risk:
+        se = social_engineering_risk
+        out += ["", "---", "", f"## Risque d'ingenierie sociale : {se['risk_level']}", ""]
+        if se["exposed_info"]:
+            out.append("### Informations exposees")
+            out.append("")
+            out.append("| Information | Niveau de risque |")
+            out.append("|---|---|")
+            for info, level in se["exposed_info"]:
+                out.append(f"| {cell(info)} | **{level}** |")
+            out.append("")
+        if se["attack_vectors"]:
+            out.append("### Vecteurs d'attaque possibles")
+            out.append("")
+            for v in se["attack_vectors"]:
+                out.append(f"- {v}")
+            out.append("")
+        if se["security_questions_at_risk"]:
+            out.append("### Questions de securite compromises")
+            out.append("")
+            for q in se["security_questions_at_risk"]:
+                out.append(f"- {q}")
+            out.append("")
+        if se["recommendations"]:
+            out.append("### Recommandations anti-ingenierie sociale")
+            out.append("")
+            for r in se["recommendations"]:
+                out.append(f"- [ ] {r}")
+            out.append("")
+
     # --- Action plan ---
     _rs = risk_score if risk_score is not None else 0
     out += ["", "---", "", "## Plan d'action", ""]
@@ -2602,6 +2825,13 @@ def main(argv=None):
     breach_analysis = analyze_breach_severity(breaches)
     relationship_graph = build_relationship_graph(identity_card, findings, companies,
                                                    github_profiles=github_profiles, breaches=breaches)
+    data_broker_urls = build_data_broker_urls(opts.nom, opts.email, opts.phone)
+    social_engineering_risk = assess_social_engineering_risk(
+        identity_card, breaches, companies, findings, profile_details,
+        whois_results=whois_results, phone_infos=phone_infos)
+    action_priorities = generate_action_priorities(
+        breaches, findings, companies, whois_results, reputation_results,
+        address_leaks, data_classification, risk_score)
 
     elapsed = datetime.now() - started
 
@@ -2653,6 +2883,9 @@ def main(argv=None):
                 "gravatar": [asdict(g) for g in gravatar_profiles],
                 "telegram": telegram_results,
                 "relationship_graph": relationship_graph,
+                "data_broker_urls": data_broker_urls,
+                "social_engineering_risk": social_engineering_risk,
+                "action_priorities": action_priorities,
             },
             indent=2, ensure_ascii=False,
         ),
@@ -2677,7 +2910,9 @@ def main(argv=None):
                           email_guesses=email_guesses, phone_osint_urls=phone_osint_urls,
                           professional_dorks=professional_dorks, breach_analysis=breach_analysis,
                           gravatar_profiles=gravatar_profiles, telegram_results=telegram_results,
-                          relationship_graph=relationship_graph),
+                          relationship_graph=relationship_graph,
+                          data_broker_urls=data_broker_urls, social_engineering_risk=social_engineering_risk,
+                          action_priorities=action_priorities),
             encoding="utf-8",
         )
         log(f"[*] Rapport : {report_file}")
@@ -2718,10 +2953,29 @@ def main(argv=None):
                 except ImportError:
                     pdf_convert = None
             if pdf_convert:
-                pdf_path = pdf_convert(report_file)
-                log(f"[*] PDF : {pdf_path}")
+                encrypt_pw = getattr(opts, "encrypt_pdf", None)
+                pdf_path = pdf_convert(report_file, password=encrypt_pw)
+                log(f"[*] PDF : {pdf_path}" + (" (chiffre)" if encrypt_pw else ""))
             else:
                 log("[!] weasyprint non installe, PDF non genere (pip install weasyprint)")
+
+        if getattr(opts, "xlsx", False):
+            try:
+                from scripts.xlsx_export import export_xlsx
+            except ImportError:
+                try:
+                    xlsx_dir = Path(__file__).resolve().parent
+                    sys.path.insert(0, str(xlsx_dir))
+                    from xlsx_export import export_xlsx
+                except ImportError:
+                    export_xlsx = None
+            if export_xlsx:
+                json_file = report_dir / "resultats.json"
+                xlsx_path = export_xlsx(json_file, str(json_file).replace(".json", ".xlsx"))
+                if xlsx_path:
+                    log(f"[*] Excel : {xlsx_path}")
+            else:
+                log("[!] openpyxl non installe, Excel non genere (pip install openpyxl)")
     else:
         log(f"[*] JSON uniquement : {report_dir / 'resultats.json'}")
 
