@@ -111,19 +111,23 @@ def execute(cmd, log_file, cwd, timeout):
     return code, output
 
 
-def http_get_json(url, timeout=15):
-    """GET JSON from a URL, respecting proxy and CA bundle."""
+def http_get_json(url, timeout=15, retries=2):
+    """GET JSON from a URL, respecting proxy and CA bundle. Retries with exponential backoff."""
     import ssl
+    import time
     import urllib.request
     ctx = ssl.create_default_context()
     if CA_BUNDLE and os.path.exists(CA_BUNDLE):
         ctx.load_verify_locations(CA_BUNDLE)
     req = urllib.request.Request(url, headers={"User-Agent": "OSINT-Workflow/1.0", "Accept": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except Exception:
-        return None
+    for attempt in range(retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            if attempt < retries:
+                time.sleep(2 ** attempt)
+    return None
 
 
 # --- Existing tool parsers ---
@@ -643,25 +647,42 @@ def run_dns_lookup(domain, raw_dir):
 
 # --- NEW: Google dorking (extract dork URLs for the report) ---
 
+def _dork(label, query):
+    return {"label": label, "query": query, "url": f"https://www.google.com/search?q={urllib.parse.quote(query)}"}
+
+
 def build_google_dorks(nom=None, emails=None, phones=None, usernames=None):
     dorks = []
     if nom:
-        dorks.append({"label": "Nom complet", "query": f'"{nom}"', "url": f"https://www.google.com/search?q=%22{urllib.parse.quote(nom)}%22"})
-        dorks.append({"label": "Nom + adresse", "query": f'"{nom}" adresse OR rue OR avenue', "url": f"https://www.google.com/search?q=%22{urllib.parse.quote(nom)}%22+adresse+OR+rue+OR+avenue"})
-        dorks.append({"label": "Nom + telephone", "query": f'"{nom}" telephone OR tel OR phone', "url": f"https://www.google.com/search?q=%22{urllib.parse.quote(nom)}%22+telephone+OR+tel+OR+phone"})
-        dorks.append({"label": "Nom + LinkedIn", "query": f'site:linkedin.com "{nom}"', "url": f"https://www.google.com/search?q=site%3Alinkedin.com+%22{urllib.parse.quote(nom)}%22"})
-        dorks.append({"label": "Nom + Facebook", "query": f'site:facebook.com "{nom}"', "url": f"https://www.google.com/search?q=site%3Afacebook.com+%22{urllib.parse.quote(nom)}%22"})
-        dorks.append({"label": "Nom + societe.com", "query": f'site:societe.com "{nom}"', "url": f"https://www.google.com/search?q=site%3Asociete.com+%22{urllib.parse.quote(nom)}%22"})
-        dorks.append({"label": "Nom + Pages Blanches", "query": f'site:pagesjaunes.fr "{nom}"', "url": f"https://www.google.com/search?q=site%3Apagesjaunes.fr+%22{urllib.parse.quote(nom)}%22"})
-        dorks.append({"label": "Nom + fichiers (PDF, XLS)", "query": f'"{nom}" filetype:pdf OR filetype:xls OR filetype:doc', "url": f"https://www.google.com/search?q=%22{urllib.parse.quote(nom)}%22+filetype%3Apdf+OR+filetype%3Axls+OR+filetype%3Adoc"})
+        q = nom
+        dorks.append(_dork("Nom complet", f'"{q}"'))
+        dorks.append(_dork("Nom + adresse", f'"{q}" adresse OR rue OR avenue OR boulevard'))
+        dorks.append(_dork("Nom + telephone", f'"{q}" telephone OR tel OR phone'))
+        dorks.append(_dork("Nom + LinkedIn", f'site:linkedin.com "{q}"'))
+        dorks.append(_dork("Nom + Facebook", f'site:facebook.com "{q}"'))
+        dorks.append(_dork("Nom + Instagram", f'site:instagram.com "{q}"'))
+        dorks.append(_dork("Nom + Twitter/X", f'site:x.com OR site:twitter.com "{q}"'))
+        dorks.append(_dork("Nom + societe.com", f'site:societe.com "{q}"'))
+        dorks.append(_dork("Nom + Infogreffe", f'site:infogreffe.fr "{q}"'))
+        dorks.append(_dork("Nom + Pages Blanches", f'site:pagesjaunes.fr "{q}"'))
+        dorks.append(_dork("Nom + Copains d'Avant", f'site:copainsdavant.linternaute.com "{q}"'))
+        dorks.append(_dork("Nom + 118712 (annuaire)", f'site:118712.fr "{q}"'))
+        dorks.append(_dork("Nom + fichiers (PDF, XLS)", f'"{q}" filetype:pdf OR filetype:xls OR filetype:doc'))
+        dorks.append(_dork("Nom + justice / tribunal", f'"{q}" tribunal OR jugement OR condamnation OR justice'))
+        dorks.append(_dork("Nom + BODACCs (publications legales)", f'site:bodacc.fr "{q}"'))
+        dorks.append(_dork("Nom + Viadeo / Indeed / emploi", f'"{q}" site:viadeo.com OR site:indeed.fr OR site:pole-emploi.fr'))
+        dorks.append(_dork("Nom + forum / avis", f'"{q}" forum OR avis OR commentaire OR review'))
     for email in (emails or []):
-        dorks.append({"label": f"Email {email}", "query": f'"{email}"', "url": f"https://www.google.com/search?q=%22{urllib.parse.quote(email)}%22"})
-        dorks.append({"label": f"Email + paste", "query": f'"{email}" site:pastebin.com OR site:ghostbin.com', "url": f"https://www.google.com/search?q=%22{urllib.parse.quote(email)}%22+site%3Apastebin.com+OR+site%3Aghostbin.com"})
+        dorks.append(_dork(f"Email {email}", f'"{email}"'))
+        dorks.append(_dork(f"Email + paste", f'"{email}" site:pastebin.com OR site:ghostbin.com'))
+        dorks.append(_dork(f"Email + forum", f'"{email}" forum OR inscription OR registered'))
     for phone in (phones or []):
         clean = phone.replace(" ", "").replace("-", "").replace(".", "")
-        dorks.append({"label": f"Telephone {phone}", "query": f'"{clean}" OR "{phone}"', "url": f"https://www.google.com/search?q=%22{urllib.parse.quote(clean)}%22+OR+%22{urllib.parse.quote(phone)}%22"})
+        dorks.append(_dork(f"Telephone {phone}", f'"{clean}" OR "{phone}"'))
+        dorks.append(_dork(f"Telephone + annuaire", f'"{clean}" site:118712.fr OR site:pagesjaunes.fr'))
     for u in (usernames or []):
-        dorks.append({"label": f"Pseudo {u} (web)", "query": f'"{u}" -site:github.com', "url": f"https://www.google.com/search?q=%22{urllib.parse.quote(u)}%22+-site%3Agithub.com"})
+        dorks.append(_dork(f"Pseudo {u} (web)", f'"{u}" -site:github.com'))
+        dorks.append(_dork(f"Pseudo {u} (forum)", f'"{u}" forum OR profil OR profile OR membre'))
     return dorks
 
 
@@ -699,6 +720,80 @@ def merge_findings(runs):
     return sorted(merged.values(), key=lambda f: (f.kind, f.identifier.lower(), f.site.lower()))
 
 
+# --- Identity card (cross-reference consolidation) ---
+
+def build_identity_card(opts, profile_details, phone_infos, companies, whois_results,
+                        reputation_results=None, breaches=None, findings=None):
+    """Consolidate all discovered data points into a single identity summary."""
+    card = {}
+    if opts.nom:
+        card["nom"] = opts.nom
+    if profile_details.get("fullname"):
+        card["noms_detectes"] = profile_details["fullname"]
+    card["emails"] = list(opts.email)
+    card["pseudos"] = list(opts.username)
+    card["telephones"] = list(opts.phone)
+
+    if profile_details.get("location"):
+        card["localisations"] = profile_details["location"]
+    if profile_details.get("city"):
+        card["villes"] = profile_details["city"]
+    if profile_details.get("country"):
+        card["pays"] = profile_details["country"]
+    if profile_details.get("occupation"):
+        card["professions"] = profile_details["occupation"]
+    if profile_details.get("company"):
+        card["entreprises_profil"] = profile_details["company"]
+    if profile_details.get("education"):
+        card["formation"] = profile_details["education"]
+    if profile_details.get("bio"):
+        card["bio"] = profile_details["bio"]
+    if profile_details.get("website"):
+        card["sites_web"] = profile_details["website"]
+
+    if phone_infos:
+        card["operateurs"] = list({p.carrier for p in phone_infos if p.carrier})
+        card["pays_telephone"] = list({p.country for p in phone_infos if p.country})
+
+    if companies:
+        card["entreprises_registre"] = [
+            {"nom": c.name, "siren": c.siren, "role": c.role, "adresse": c.address}
+            for c in companies
+        ]
+
+    whois_found = [w for w in (whois_results or []) if w is not None]
+    if whois_found:
+        card["domaines_personnels"] = [w["domain"] for w in whois_found]
+        for w in whois_found:
+            if w.get("registrant_name"):
+                card.setdefault("noms_whois", []).append(w["registrant_name"])
+            if w.get("registrant_address") or w.get("registrant_city"):
+                addr = " ".join(filter(None, [w.get("registrant_address"), w.get("registrant_city"), w.get("registrant_country")]))
+                card.setdefault("adresses_whois", []).append(addr)
+
+    rep_valid = [r for r in (reputation_results or []) if not r.get("error")]
+    if rep_valid:
+        all_profiles = set()
+        for r in rep_valid:
+            all_profiles.update(r.get("profiles", []))
+        if all_profiles:
+            card["profils_reputation"] = sorted(all_profiles)
+
+    if breaches:
+        card["nb_fuites"] = len(breaches)
+        all_types = set()
+        for b in breaches:
+            all_types.update(b.data_types)
+        if all_types:
+            card["types_donnees_exposees"] = sorted(all_types)
+
+    if findings:
+        card["nb_comptes"] = len(findings)
+        card["sites_principaux"] = [f.site for f in findings[:10]]
+
+    return card
+
+
 # --- Report ---
 
 def cell(text):
@@ -706,7 +801,7 @@ def cell(text):
 
 
 def render_report(opts, runs, findings, started, breaches, companies, phone_infos, whois_results, dorks, profile_details,
-                   reputation_results=None, wayback_results=None, dns_results=None, paste_urls=None):
+                   reputation_results=None, wayback_results=None, dns_results=None, paste_urls=None, identity_card=None):
     by_kind = {"username": [], "email": []}
     for finding in findings:
         by_kind[finding.kind].append(finding)
@@ -733,7 +828,10 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
     total_accounts = len(findings)
     total_breaches = len(breaches)
     total_companies = len(companies)
-    risk_level = "ELEVE" if total_breaches > 3 or total_accounts > 20 else "MOYEN" if total_breaches > 0 or total_accounts > 5 else "FAIBLE"
+    rep_leaked = any(r.get("credentials_leaked") or r.get("data_breach") for r in (reputation_results or []) if not r.get("error"))
+    rep_suspicious = any(r.get("suspicious") or r.get("blacklisted") for r in (reputation_results or []) if not r.get("error"))
+    risk_level = "ELEVE" if total_breaches > 3 or total_accounts > 20 or rep_leaked else \
+                 "MOYEN" if total_breaches > 0 or total_accounts > 5 or rep_suspicious or total_companies > 0 else "FAIBLE"
     out.append(f"**Niveau d'exposition global : {risk_level}**")
     out.append("")
     out.append(f"| Indicateur | Nombre |")
@@ -747,6 +845,43 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
     if failed:
         out.append("")
         out.append(f"**Attention : {len(failed)} scan(s) en echec, le resultat est incomplet.**")
+
+    # --- Identity card (consolidated) ---
+    _card = identity_card or {}
+    if _card:
+        out += ["", "### Fiche d'identite numerique consolidee", ""]
+        card_labels = {
+            "nom": "Nom fourni", "noms_detectes": "Noms detectes sur les profils",
+            "localisations": "Localisations", "villes": "Villes", "pays": "Pays",
+            "professions": "Professions", "entreprises_profil": "Entreprises (profils)",
+            "formation": "Formation", "bio": "Bio",
+            "sites_web": "Sites web personnels", "operateurs": "Operateurs telephone",
+            "pays_telephone": "Pays telephone", "domaines_personnels": "Domaines email personnels",
+            "noms_whois": "Noms (WHOIS)", "adresses_whois": "Adresses (WHOIS)",
+            "profils_reputation": "Profils detectes (reputation email)",
+            "types_donnees_exposees": "Types de donnees exposees dans les fuites",
+        }
+        out.append("| Information | Valeur(s) |")
+        out.append("|---|---|")
+        for key, label in card_labels.items():
+            val = _card.get(key)
+            if val:
+                if isinstance(val, list):
+                    out.append(f"| {label} | {cell(', '.join(str(v) for v in val))} |")
+                else:
+                    out.append(f"| {label} | {cell(str(val))} |")
+        if _card.get("entreprises_registre"):
+            for ent in _card["entreprises_registre"]:
+                out.append(f"| Entreprise (registre) | {cell(ent['nom'])} - SIREN {cell(ent['siren'])} - {cell(ent['role'])} |")
+        counts = []
+        if _card.get("nb_comptes"):
+            counts.append(f"{_card['nb_comptes']} comptes en ligne")
+        if _card.get("nb_fuites"):
+            counts.append(f"{_card['nb_fuites']} fuites")
+        if counts:
+            out.append(f"| **Exposition** | **{', '.join(counts)}** |")
+        out.append("")
+        out.append("*Ce tableau consolide les informations trouvees par tous les modules. Verifier chaque element avec le client.*")
 
     # --- Profil synthetique (extracted from Maigret) ---
     if profile_details:
@@ -1179,6 +1314,9 @@ def main(argv=None):
     profile_details = extract_profile_details(runs)
     dorks = build_google_dorks(opts.nom, opts.email, opts.phone, opts.username)
 
+    identity_card = build_identity_card(opts, profile_details, phone_infos, companies, whois_results,
+                                         reputation_results=reputation_results, breaches=breaches, findings=findings)
+
     (report_dir / "resultats.json").write_text(
         json.dumps(
             {
@@ -1201,16 +1339,18 @@ def main(argv=None):
                 "profil": profile_details,
                 "dorks": dorks,
                 "paste_urls": paste_urls,
+                "identity_card": identity_card,
             },
             indent=2, ensure_ascii=False,
         ),
         encoding="utf-8",
     )
+
     report_file = report_dir / "RAPPORT.md"
     report_file.write_text(
         render_report(opts, runs, findings, started, breaches, companies, phone_infos, whois_results, dorks, profile_details,
                       reputation_results=reputation_results, wayback_results=wayback_results,
-                      dns_results=dns_results, paste_urls=paste_urls),
+                      dns_results=dns_results, paste_urls=paste_urls, identity_card=identity_card),
         encoding="utf-8",
     )
 

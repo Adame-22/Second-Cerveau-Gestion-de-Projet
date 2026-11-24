@@ -262,5 +262,39 @@ class SkipChoicesTest(unittest.TestCase):
         self.assertIn("reputation", opts.skip)
 
 
+class IdentityCardTest(unittest.TestCase):
+    def test_builds_card_from_all_sources(self):
+        opts = runner.parse_args(["-m", "M1", "-e", "jean@custom-domain.fr", "-u", "jdupont",
+                                  "-p", "+33612345678", "-n", "Jean Dupont"])
+        profile = {"fullname": ["Jean Dupont"], "location": ["Paris"], "company": ["ACME Corp"]}
+        phones = [runner.PhoneInfo("+33612345678", True, "France", "SFR", "mobile", "France")]
+        companies = [runner.CompanyInfo("ACME SAS", "123456789", "President", "Active", "1 rue test", "2020-01-01", "Pappers")]
+        whois = [{"domain": "custom-domain.fr", "registrant_name": "Jean Dupont", "registrant_city": "Paris"}]
+        breaches = [runner.BreachInfo("jean@custom-domain.fr", "BigBreach", "2021-01-01", ["Passwords", "Email addresses"])]
+        findings = [runner.Finding("jdupont", "username", "GitHub", "https://github.com/jdupont", ["sherlock"])]
+        rep = [{"email": "jean@custom-domain.fr", "reputation": "high", "suspicious": False, "profiles": ["linkedin"]}]
+
+        card = runner.build_identity_card(opts, profile, phones, companies, whois,
+                                          reputation_results=rep, breaches=breaches, findings=findings)
+
+        self.assertEqual(card["nom"], "Jean Dupont")
+        self.assertEqual(card["noms_detectes"], ["Jean Dupont"])
+        self.assertIn("Paris", card["localisations"])
+        self.assertEqual(card["operateurs"], {"SFR"})
+        self.assertEqual(card["entreprises_registre"][0]["nom"], "ACME SAS")
+        self.assertEqual(card["domaines_personnels"], ["custom-domain.fr"])
+        self.assertEqual(card["profils_reputation"], ["linkedin"])
+        self.assertEqual(card["nb_fuites"], 1)
+        self.assertIn("Passwords", card["types_donnees_exposees"])
+        self.assertEqual(card["nb_comptes"], 1)
+
+    def test_card_empty_inputs(self):
+        opts = runner.parse_args(["-m", "M1", "-e", "a@b.com"])
+        card = runner.build_identity_card(opts, {}, [], [], [])
+        self.assertEqual(card["emails"], ["a@b.com"])
+        self.assertNotIn("nom", card)
+        self.assertNotIn("nb_fuites", card)
+
+
 if __name__ == "__main__":
     unittest.main()

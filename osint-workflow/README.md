@@ -42,14 +42,16 @@ venv\Scripts\pip install -r requirements.txt
 | `--phone`, `-p` | Numero de telephone (repetable, format international recommande) |
 | `--nom`, `-n` | Nom complet (active la recherche d'entreprise et les Google dorks) |
 | `--all-sites` / `--top-sites N` | Etendue de la recherche Maigret (defaut : top 500) |
-| `--skip OUTIL` | Ne pas lancer un module : `holehe`, `sherlock`, `maigret`, `breach`, `company`, `whois`, `phone` |
+| `--skip OUTIL` | Ne pas lancer un module : `holehe`, `sherlock`, `maigret`, `breach`, `company`, `whois`, `phone`, `reputation`, `wayback`, `dns`, `paste` |
 | `--timeout`, `--tool-timeout` | Timeout par requete (10 s) et duree maximale par outil (1800 s) |
+| `--pdf` | Generer un export PDF en plus du Markdown (necessite `weasyprint`) |
+| `--config CHEMIN` | Fichier config.json alternatif (cles API, options par defaut) |
 
 ## Rapport genere
 
 Chaque audit cree `reports/<date>_<mandat>/` (jamais versionne) :
 
-- `RAPPORT.md` : livrable client complet avec 11 sections
+- `RAPPORT.md` : livrable client complet avec 15 sections
 - `resultats.json` : memes donnees, exploitables par un autre outil
 - `brut/` : journaux et exports de chaque outil
 
@@ -61,11 +63,15 @@ Chaque audit cree `reports/<date>_<mandat>/` (jamais versionne) :
 4. **Fuites de donnees** : breaches connues via HIBP / h8mail avec types de donnees exposees
 5. **Entreprises** : registres francais (Pappers.fr), adresse du siege, role du dirigeant
 6. **WHOIS** : domaines email personnels, exposition du nom et de l'adresse du proprietaire
-7. **Detail des scans** : tableau de synthese par outil
-8. **Comptes (pseudos)** : sites, liens, informations visibles sur chaque profil
-9. **Comptes (email)** : services ou l'email est inscrit
-10. **Identifiants supplementaires** : autres pseudos reperes sur les profils
-11. **Google dorks** : liens cliquables pour approfondir manuellement (LinkedIn, Facebook, societe.com, Pages Blanches, documents PDF/XLS, pastebin)
+7. **Reputation email** : reputation, blacklist, credentials leaked, profils detectes (emailrep.io)
+8. **Detail des scans** : tableau de synthese par outil
+9. **Comptes (pseudos)** : sites, liens, informations visibles sur chaque profil
+10. **Comptes (email)** : services ou l'email est inscrit
+11. **Identifiants supplementaires** : autres pseudos reperes sur les profils
+12. **Google dorks** : liens cliquables pour approfondir manuellement (LinkedIn, Facebook, societe.com, Pages Blanches, documents PDF/XLS)
+13. **Pastes et fuites** : liens vers Pastebin, GitHub Gists, IntelligenceX, Dehashed
+14. **DNS** : enregistrements MX, SPF, DMARC des domaines email personnels, hebergeur detecte
+15. **Wayback Machine** : historique d'archivage des profils trouves (plus ancien/recent snapshot)
 
 ## Modules d'investigation
 
@@ -78,6 +84,10 @@ Chaque audit cree `reports/<date>_<mandat>/` (jamais versionne) :
 | Pappers.fr | Nom | Entreprises liees (dirigeant, siege, SIREN) |
 | phonenumbers | Telephone | Validation, operateur, pays, type de ligne |
 | WHOIS | Email | Proprietaire de domaines email personnels |
+| emailrep.io | Email | Reputation, blacklist, profils sociaux detectes, credentials leaked |
+| Wayback Machine | URLs trouvees | Archives historiques des profils (CDX API, gratuit) |
+| DNS (dig) | Domaines email | MX, SPF, DMARC, hebergeur email (Google Workspace, Microsoft 365, OVH...) |
+| Paste search | Tous | Liens vers Pastebin, GitHub Gists, IntelligenceX, Dehashed |
 | Google dorks | Tous | Liens de recherche avancee a ouvrir manuellement |
 
 Les scans de la phase 1 (comptes) et de la phase 2 (analyse approfondie) tournent en parallele.
