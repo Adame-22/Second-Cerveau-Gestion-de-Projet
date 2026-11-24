@@ -1270,6 +1270,11 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
     leads = sorted({lead for run in runs for lead in run.leads})
     failed = [run for run in runs if not run.ok]
 
+    _sec = [0]
+    def S(title):
+        _sec[0] += 1
+        return f"## {_sec[0]}. {title}"
+
     out = [
         "# Rapport d'investigation OSINT",
         "",
@@ -1292,7 +1297,13 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
     total_companies = len(companies)
     risk_score, risk_level = compute_risk_score(findings, breaches, companies, phone_infos, whois_results,
                                                 reputation_results=reputation_results, dns_results=dns_results)
-    out.append(f"**Niveau d'exposition global : {risk_level} ({risk_score}/100)**")
+    filled = risk_score // 5
+    gauge = "[" + "#" * filled + "." * (20 - filled) + f"] {risk_score}/100"
+    out.append(f"**Niveau d'exposition global : {risk_level}**")
+    out.append("")
+    out.append(f"```")
+    out.append(f"Score de risque : {gauge}")
+    out.append(f"```")
     out.append("")
     out.append(f"| Indicateur | Nombre |")
     out.append(f"|---|---|")
@@ -1739,6 +1750,19 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
         "- Les fuites de donnees ne sont verifiees que via les bases gratuites (HIBP sans cle API, h8mail).",
         "- L'API HIBP v3 necessite une cle payante pour des resultats complets ; sans cle, les resultats peuvent etre partiels.",
         "",
+        "---",
+        "",
+        "## Confidentialite",
+        "",
+        "Ce rapport contient des donnees personnelles au sens du RGPD (Reglement General sur la Protection des Donnees).",
+        "Il est destine exclusivement a la personne concernee et au mandataire identifie dans l'en-tete.",
+        "",
+        "- **Conservation** : ce rapport doit etre supprime a la fin de la mission.",
+        "- **Diffusion** : toute diffusion a des tiers non autorises est interdite.",
+        "- **Droit d'acces** : la personne concernee peut demander une copie ou la suppression de ce rapport (RGPD art. 15 et 17).",
+        "",
+        f"*Rapport genere automatiquement le {started.strftime('%d/%m/%Y a %H:%M')} — Mandat {opts.mandat}*",
+        "",
     ]
     return "\n".join(out)
 
@@ -1772,6 +1796,8 @@ def parse_args(argv=None):
                         help="Generer uniquement resultats.json (pas de Markdown/PDF/CSV)")
     parser.add_argument("--quiet", "-q", action="store_true",
                         help="Mode silencieux : supprime les messages de progression")
+    parser.add_argument("--output-dir", "-o",
+                        help="Repertoire de sortie personnalise (defaut : reports/<timestamp>_<mandat>)")
     opts = parser.parse_args(argv)
 
     if opts.config:
@@ -1802,7 +1828,10 @@ def main(argv=None):
         if not quiet:
             print(msg)
 
-    report_dir = REPORTS_DIR / f"{started.strftime('%Y%m%d_%H%M%S')}_{safe_name(opts.mandat)}"
+    if opts.output_dir:
+        report_dir = Path(opts.output_dir)
+    else:
+        report_dir = REPORTS_DIR / f"{started.strftime('%Y%m%d_%H%M%S')}_{safe_name(opts.mandat)}"
     raw_dir = report_dir / "brut"
     raw_dir.mkdir(parents=True)
 
@@ -1959,9 +1988,16 @@ def main(argv=None):
     address_leaks = detect_address_leaks(breaches, whois_results, profile_details, companies)
     timeline = build_exposure_timeline(breaches, wayback_results, findings, companies)
 
+    elapsed = datetime.now() - started
+
     (report_dir / "resultats.json").write_text(
         json.dumps(
             {
+                "meta": {
+                    "version": "2.0.0",
+                    "tool": "osint-workflow",
+                    "duration_seconds": int(elapsed.total_seconds()),
+                },
                 "date": started.isoformat(timespec="seconds"),
                 "mandat": opts.mandat,
                 "nom": opts.nom,
@@ -2050,7 +2086,6 @@ def main(argv=None):
     else:
         log(f"[*] JSON uniquement : {report_dir / 'resultats.json'}")
 
-    elapsed = datetime.now() - started
     minutes, seconds = divmod(int(elapsed.total_seconds()), 60)
     log(f"[*] Termine en {minutes}m{seconds:02d}s")
 
