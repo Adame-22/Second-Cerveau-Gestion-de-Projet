@@ -99,9 +99,22 @@ code {
     font-size: 9pt;
 }
 
+.risk-critique { color: #9b2c2c; font-weight: bold; font-size: 14pt; background: #fff5f5; padding: 2px 6px; border-radius: 3px; }
 .risk-eleve { color: #e53e3e; font-weight: bold; font-size: 14pt; }
 .risk-moyen { color: #dd6b20; font-weight: bold; font-size: 14pt; }
 .risk-faible { color: #38a169; font-weight: bold; font-size: 14pt; }
+
+.priority-urgent { background: #fff5f5; border-left: 3px solid #e53e3e; padding: 4px 8px; margin: 4px 0; }
+.priority-important { background: #fffaf0; border-left: 3px solid #dd6b20; padding: 4px 8px; margin: 4px 0; }
+.priority-recommended { background: #f0fff4; border-left: 3px solid #38a169; padding: 4px 8px; margin: 4px 0; }
+
+blockquote {
+    border-left: 3px solid #2b6cb0;
+    padding: 8px 12px;
+    margin: 10px 0;
+    background: #ebf8ff;
+    font-style: italic;
+}
 """
 
 
@@ -180,6 +193,13 @@ def md_to_html(md_text):
                 i += 1
             continue
 
+        # Blockquote
+        if stripped.startswith("> "):
+            content = stripped[2:]
+            html_parts.append(f"<blockquote>{_inline(content)}</blockquote>")
+            i += 1
+            continue
+
         # List items
         if stripped.startswith("- "):
             if not in_ul:
@@ -212,6 +232,8 @@ def md_to_html(md_text):
 def _inline(text):
     """Convert inline Markdown: bold, links, code."""
     # Risk level coloring
+    text = re.sub(r"\*\*Niveau d'exposition global : (CRITIQUE)\*\*",
+                  r'<span class="risk-critique">Niveau d\'exposition global : \1</span>', text)
     text = re.sub(r"\*\*Niveau d'exposition global : (ELEVE)\*\*",
                   r'<span class="risk-eleve">Niveau d\'exposition global : \1</span>', text)
     text = re.sub(r"\*\*Niveau d'exposition global : (MOYEN)\*\*",
@@ -227,7 +249,21 @@ def _inline(text):
     return text
 
 
-def convert(md_path, pdf_path=None):
+def encrypt_pdf(pdf_path, password):
+    """Encrypt an existing PDF with a password using pikepdf."""
+    try:
+        import pikepdf
+    except ImportError:
+        print("[!] pikepdf non installe. pip install pikepdf")
+        return pdf_path
+    pdf = pikepdf.open(pdf_path)
+    pdf.save(pdf_path, encryption=pikepdf.Encryption(owner=password, user=password, R=6))
+    pdf.close()
+    print(f"[*] PDF chiffre avec mot de passe : {pdf_path}")
+    return pdf_path
+
+
+def convert(md_path, pdf_path=None, password=None):
     md_text = Path(md_path).read_text(encoding="utf-8")
     html_text = md_to_html(md_text)
     if pdf_path is None:
@@ -238,7 +274,10 @@ def convert(md_path, pdf_path=None):
 
     if HAS_WEASYPRINT:
         HTML(string=html_text).write_pdf(pdf_path)
-        print(f"[*] PDF genere : {pdf_path}")
+        if password:
+            encrypt_pdf(pdf_path, password)
+        else:
+            print(f"[*] PDF genere : {pdf_path}")
         return pdf_path
     else:
         print(f"[!] weasyprint non installe, HTML genere a la place : {html_intermediate}")
@@ -249,5 +288,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Convertir RAPPORT.md en PDF")
     parser.add_argument("rapport", help="Chemin vers RAPPORT.md")
     parser.add_argument("-o", "--output", help="Chemin de sortie PDF")
+    parser.add_argument("--password", help="Chiffrer le PDF avec ce mot de passe")
     args = parser.parse_args()
-    convert(args.rapport, args.output)
+    convert(args.rapport, args.output, args.password)
