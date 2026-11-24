@@ -965,6 +965,41 @@ def generate_username_permutations(nom=None, emails=None, usernames=None):
     return sorted(perms - existing)
 
 
+def generate_email_guesses(nom=None, emails=None):
+    """Generate likely email addresses from a name and known domains."""
+    if not nom:
+        return []
+    parts = nom.lower().split()
+    if len(parts) < 2:
+        return []
+    first, last = parts[0], parts[-1]
+    import unicodedata
+    first = ''.join(c for c in unicodedata.normalize('NFD', first) if unicodedata.category(c) != 'Mn')
+    last = ''.join(c for c in unicodedata.normalize('NFD', last) if unicodedata.category(c) != 'Mn')
+
+    patterns = [
+        f"{first}.{last}", f"{first}{last}", f"{first[0]}.{last}",
+        f"{first[0]}{last}", f"{last}.{first}", f"{last}{first[0]}",
+        f"{first}_{last}", f"{first}-{last}",
+    ]
+    providers = ["gmail.com", "outlook.com", "yahoo.fr", "hotmail.fr", "protonmail.com"]
+    if emails:
+        for e in emails:
+            d = e.split("@", 1)[1].lower()
+            if d not in providers:
+                providers.insert(0, d)
+
+    guesses = []
+    seen = set(e.lower() for e in (emails or []))
+    for pattern in patterns:
+        for provider in providers:
+            addr = f"{pattern}@{provider}"
+            if addr not in seen:
+                guesses.append(addr)
+                seen.add(addr)
+    return guesses
+
+
 # --- Risk scoring (weighted) ---
 
 
@@ -1020,6 +1055,66 @@ def classify_exposed_data(breaches, whois_results, reputation_results, findings)
         categories["FAIBLE"].append({"type": f"{nb} comptes publics detectes", "source": "Scan de comptes", "date": ""})
 
     return categories
+
+
+def analyze_breach_severity(breaches):
+    """Analyze breach severity and generate risk indicators."""
+    if not breaches:
+        return {"total": 0, "critical_count": 0, "password_exposed": False, "financial_exposed": False,
+                "identity_exposed": False, "earliest_breach": None, "latest_breach": None, "summary": []}
+
+    critical_types = {"Passwords", "Password hints", "Credit cards", "Bank account numbers",
+                      "Credit card CVV", "PINs", "Security questions and answers"}
+    financial_types = {"Credit cards", "Bank account numbers", "Credit card CVV", "Payment histories",
+                       "Financial investments", "Income levels"}
+    identity_types = {"Government issued IDs", "Passport numbers", "Social security numbers",
+                      "Dates of birth", "Physical addresses", "National IDs"}
+
+    password_exposed = False
+    financial_exposed = False
+    identity_exposed = False
+    critical_count = 0
+    dates = []
+    summary = []
+
+    for b in breaches:
+        types_set = set(b.data_types)
+        is_critical = bool(types_set & critical_types)
+        is_financial = bool(types_set & financial_types)
+        is_identity = bool(types_set & identity_types)
+
+        if is_critical:
+            critical_count += 1
+            password_exposed = password_exposed or "Passwords" in types_set
+            financial_exposed = financial_exposed or is_financial
+            identity_exposed = identity_exposed or is_identity
+
+        severity = "CRITIQUE" if is_critical else ("ELEVE" if is_identity or is_financial else "MOYEN")
+        summary.append({
+            "breach_name": b.breach_name,
+            "breach_date": b.breach_date,
+            "severity": severity,
+            "exposed_types": b.data_types,
+            "has_passwords": "Passwords" in types_set,
+            "has_financial": is_financial,
+            "has_identity": is_identity,
+        })
+
+        if b.breach_date:
+            dates.append(b.breach_date)
+
+    dates.sort()
+    return {
+        "total": len(breaches),
+        "critical_count": critical_count,
+        "password_exposed": password_exposed,
+        "financial_exposed": financial_exposed,
+        "identity_exposed": identity_exposed,
+        "earliest_breach": dates[0] if dates else None,
+        "latest_breach": dates[-1] if dates else None,
+        "summary": summary,
+    }
+
 
 def compute_risk_score(findings, breaches, companies, phone_infos, whois_results,
                        reputation_results=None, dns_results=None):
@@ -1179,6 +1274,41 @@ def build_family_search_dorks(nom=None, prenom=None, dob=None, phones=None):
         clean = phone.replace(" ", "").replace("-", "").replace(".", "")
         dorks.append(_dork(f"Telephone + annuaire ({phone})", f'"{clean}" annuaire OR "pages blanches" OR 118712'))
 
+    return dorks
+
+
+def build_professional_dorks(nom=None, emails=None, usernames=None):
+    """Generate Google dorks for professional networks and job boards."""
+    dorks = []
+    if not nom and not emails and not usernames:
+        return dorks
+    if nom:
+        dorks.extend([
+            _dork("LinkedIn profil", f'site:linkedin.com/in "{nom}"'),
+            _dork("LinkedIn posts", f'site:linkedin.com/posts "{nom}"'),
+            _dork("Indeed CV", f'site:indeed.fr "{nom}"'),
+            _dork("Viadeo", f'site:viadeo.com "{nom}"'),
+            _dork("Angel.co", f'site:angel.co "{nom}"'),
+            _dork("Crunchbase", f'site:crunchbase.com "{nom}"'),
+            _dork("Malt freelance", f'site:malt.fr "{nom}"'),
+            _dork("Wellfound", f'site:wellfound.com "{nom}"'),
+            _dork("Glassdoor", f'site:glassdoor.fr "{nom}"'),
+            _dork("Societe.com dirigeant", f'site:societe.com "{nom}"'),
+            _dork("Verif.com", f'site:verif.com "{nom}"'),
+            _dork("Manageo", f'site:manageo.fr "{nom}"'),
+            _dork("Infogreffe", f'site:infogreffe.fr "{nom}"'),
+            _dork("BFRP", f'site:bfrp.gouv.fr "{nom}"'),
+        ])
+    for u in (usernames or []):
+        dorks.extend([
+            _dork(f"LinkedIn ({u})", f'site:linkedin.com "{u}"'),
+            _dork(f"Malt ({u})", f'site:malt.fr "{u}"'),
+        ])
+    for email in (emails or []):
+        dorks.extend([
+            _dork(f"LinkedIn ({email})", f'site:linkedin.com "{email}"'),
+            _dork(f"CV en ligne ({email})", f'filetype:pdf "{email}" CV OR resume OR curriculum'),
+        ])
     return dorks
 
 
@@ -1392,6 +1522,26 @@ def build_dark_web_check_urls(emails=None, usernames=None, phones=None):
 
 
 
+def build_phone_osint_urls(phones=None):
+    """Generate phone OSINT investigation URLs."""
+    urls = []
+    for phone in (phones or []):
+        clean = re.sub(r'[^0-9+]', '', phone)
+        q = urllib.parse.quote(clean)
+        local = clean.replace('+33', '0')
+        urls.extend([
+            {"platform": "Truecaller", "url": f"https://www.truecaller.com/search/fr/{q}", "type": "caller_id"},
+            {"platform": "Sync.me", "url": f"https://sync.me/search/?number={q}", "type": "caller_id"},
+            {"platform": "NumeroInverse.com", "url": f"https://www.numeroinverse.com/numero/{local}", "type": "annuaire_inverse"},
+            {"platform": "PagesJaunes", "url": f"https://www.pagesjaunes.fr/annuaireinverse/recherche?quoiqui={q}", "type": "annuaire"},
+            {"platform": "118712", "url": f"https://www.118712.fr/annuaire-inverse/{local}", "type": "annuaire_inverse"},
+            {"platform": "Phoneinfoga", "url": "https://github.com/sundowndev/phoneinfoga", "type": "outil"},
+            {"platform": "CallerID Test", "url": "https://calleridtest.com/", "type": "outil"},
+            {"platform": "Tellows", "url": f"https://www.tellows.fr/num/{local}", "type": "reputation"},
+        ])
+    return urls
+
+
 # --- Report ---
 
 def cell(text):
@@ -1403,7 +1553,8 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
                    username_permutations=None, risk_score=None, correlations=None, family_dorks=None,
                    data_classification=None, dark_web_urls=None,
                    reverse_images=None, address_leaks=None, timeline=None,
-                   crt_sh_results=None, github_profiles=None, age_info=None):
+                   crt_sh_results=None, github_profiles=None, age_info=None,
+                   email_guesses=None, phone_osint_urls=None, professional_dorks=None, breach_analysis=None):
     by_kind = {"username": [], "email": []}
     for finding in findings:
         by_kind[finding.kind].append(finding)
@@ -1437,9 +1588,11 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
     total_companies = len(companies)
     risk_score, risk_level = compute_risk_score(findings, breaches, companies, phone_infos, whois_results,
                                                 reputation_results=reputation_results, dns_results=dns_results)
-    filled = risk_score // 5
-    gauge = "[" + "#" * filled + "." * (20 - filled) + f"] {risk_score}/100"
-    out.append(f"**Niveau d'exposition global : {risk_level}**")
+    gauge_width = 30
+    filled = int(risk_score / 100 * gauge_width) if risk_score else 0
+    gauge = "[" + "█" * filled + "░" * (gauge_width - filled) + f"] {risk_score}/100"
+    risk_icon = {"FAIBLE": "\U0001f7e2", "MOYEN": "\U0001f7e1", "ELEVE": "\U0001f7e0", "CRITIQUE": "\U0001f534"}.get(risk_level, "⚪")
+    out.append(f"**{risk_icon} Niveau d'exposition global : {risk_level}**")
     out.append("")
     out.append(f"```")
     out.append(f"Score de risque : {gauge}")
@@ -1452,6 +1605,15 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
     out.append(f"| Entreprises liees | {total_companies} |")
     out.append(f"| Scans lances | {len(runs)} |")
     out.append(f"| Scans en echec | {len(failed)} |")
+    _ba = breach_analysis or {}
+    if _ba.get("total"):
+        out.append(f"| Fuites critiques (mots de passe/financier) | {_ba.get('critical_count', 0)} |")
+        if _ba.get("password_exposed"):
+            out.append(f"| Mots de passe exposes | Oui |")
+        if _ba.get("financial_exposed"):
+            out.append(f"| Donnees financieres exposees | Oui |")
+        if _ba.get("identity_exposed"):
+            out.append(f"| Documents d'identite exposes | Oui |")
 
     if failed:
         out.append("")
@@ -1869,6 +2031,48 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
                 f"- Age estime : **{age_info[0]} ans**",
                 ""]
 
+    # --- Breach severity analysis ---
+    _ba = breach_analysis or {}
+    if _ba.get("summary"):
+        out += ["", S("Analyse de severite des fuites"), ""]
+        out.append("| Fuite | Date | Severite | Mots de passe | Financier | Identite |")
+        out.append("|---|---|---|---|---|---|")
+        for bs in _ba["summary"]:
+            out.append(f"| {cell(bs['breach_name'])} | {cell(bs.get('breach_date',''))} | **{bs['severity']}** | "
+                       f"{'Oui' if bs.get('has_passwords') else '-'} | "
+                       f"{'Oui' if bs.get('has_financial') else '-'} | "
+                       f"{'Oui' if bs.get('has_identity') else '-'} |")
+        if _ba.get("earliest_breach"):
+            out += ["", f"- **Premiere fuite connue :** {_ba['earliest_breach']}",
+                    f"- **Derniere fuite connue :** {_ba.get('latest_breach', '')}"]
+
+    # --- Professional dorks ---
+    _pdorks = professional_dorks or []
+    if _pdorks:
+        out += ["", S("Dorks professionnels (LinkedIn, registres, freelance)"), ""]
+        for d in _pdorks:
+            out.append(f"- [{d['label']}]({d['url']})")
+
+    # --- Phone OSINT URLs ---
+    _posint = phone_osint_urls or []
+    if _posint:
+        out += ["", S("OSINT telephone (annuaires, CallerID)"), ""]
+        out.append("| Plateforme | Type | Lien |")
+        out.append("|---|---|---|")
+        for pu in _posint:
+            out.append(f"| {cell(pu['platform'])} | {cell(pu['type'])} | [{pu['platform']}]({pu['url']}) |")
+
+    # --- Email guesses ---
+    _eg = email_guesses or []
+    if _eg:
+        out += ["", S("Pistes email probables (non verifiees)"), ""]
+        out.append("*Ces adresses sont generees automatiquement a partir du nom. "
+                   "Elles ne sont PAS recherchees automatiquement pour respecter le RGPD. "
+                   "Verifier manuellement avec l'accord du client.*")
+        out.append("")
+        for addr in _eg[:30]:
+            out.append(f"- `{addr}`")
+
     # --- Action plan ---
     _rs = risk_score if risk_score is not None else 0
     out += ["", "---", "", "## Plan d'action", ""]
@@ -1985,7 +2189,7 @@ def parse_args(argv=None):
     parser.add_argument("--top-sites", type=int, default=500, help="Maigret : nombre de sites (defaut 500)")
     parser.add_argument("--skip", action="append", default=[],
                         choices=["holehe", "sherlock", "maigret", "breach", "company", "whois", "phone",
-                                 "reputation", "wayback", "dns", "paste", "social", "family"],
+                                 "reputation", "wayback", "dns", "paste", "social", "family", "crt", "github"],
                         help="Module a ne pas lancer (repetable)")
     parser.add_argument("--timeout", type=int, default=10, help="Timeout par requete (defaut 10)")
     parser.add_argument("--tool-timeout", type=int, default=1800, help="Duree max par outil (defaut 1800)")
@@ -2218,6 +2422,10 @@ def main(argv=None):
     address_leaks = detect_address_leaks(breaches, whois_results, profile_details, companies)
     timeline = build_exposure_timeline(breaches, wayback_results, findings, companies)
     age_info = compute_age(getattr(opts, "dob", None))
+    email_guesses = generate_email_guesses(opts.nom, opts.email)
+    phone_osint_urls = build_phone_osint_urls(opts.phone)
+    professional_dorks = build_professional_dorks(opts.nom, opts.email, opts.username)
+    breach_analysis = analyze_breach_severity(breaches)
 
     elapsed = datetime.now() - started
 
@@ -2261,6 +2469,10 @@ def main(argv=None):
                 "timeline": timeline,
                 "crt_sh": [asdict(c) for c in crt_sh_results],
                 "github_profiles": [asdict(g) for g in github_profiles],
+                "email_guesses": email_guesses,
+                "phone_osint_urls": phone_osint_urls,
+                "professional_dorks": professional_dorks,
+                "breach_analysis": breach_analysis,
                 "age_info": {"age": age_info[0], "dob_iso": age_info[1]} if age_info[0] else None,
             },
             indent=2, ensure_ascii=False,
@@ -2280,27 +2492,39 @@ def main(argv=None):
                           username_permutations=username_permutations, risk_score=risk_score,
                           correlations=correlations, family_dorks=family_dorks, data_classification=data_classification,
                           dark_web_urls=dark_web_urls, reverse_images=reverse_images,
-                          address_leaks=address_leaks, timeline=timeline),
+                          address_leaks=address_leaks, timeline=timeline,
+                          crt_sh_results=crt_sh_results, github_profiles=github_profiles,
+                          age_info=age_info,
+                          email_guesses=email_guesses, phone_osint_urls=phone_osint_urls,
+                          professional_dorks=professional_dorks, breach_analysis=breach_analysis),
             encoding="utf-8",
         )
         log(f"[*] Rapport : {report_file}")
 
         # CSV exports
         try:
-            from scripts.csv_export import export_accounts_csv, export_breaches_csv, export_summary_csv
+            from scripts.csv_export import export_accounts_csv, export_breaches_csv, export_summary_csv, export_companies_csv
         except ImportError:
             try:
                 csv_dir = Path(__file__).resolve().parent
                 sys.path.insert(0, str(csv_dir))
-                from csv_export import export_accounts_csv, export_breaches_csv, export_summary_csv
+                from csv_export import export_accounts_csv, export_breaches_csv, export_summary_csv, export_companies_csv
             except ImportError:
-                export_accounts_csv = export_breaches_csv = export_summary_csv = None
+                export_accounts_csv = export_breaches_csv = export_summary_csv = export_companies_csv = None
         if export_accounts_csv:
             export_accounts_csv(report_dir, findings)
             if breaches:
                 export_breaches_csv(report_dir, breaches)
-            export_summary_csv(report_dir, opts, findings, breaches, companies, phone_infos)
-            log(f"[*] CSV : comptes.csv, resume.csv" + (", fuites.csv" if breaches else ""))
+            if companies and export_companies_csv:
+                export_companies_csv(report_dir, companies)
+            export_summary_csv(report_dir, opts, findings, breaches, companies, phone_infos,
+                               risk_score=risk_score, risk_level=risk_level)
+            csv_files = ["comptes.csv", "resume.csv"]
+            if breaches:
+                csv_files.append("fuites.csv")
+            if companies:
+                csv_files.append("entreprises.csv")
+            log(f"[*] CSV : {', '.join(csv_files)}")
 
         if opts.pdf:
             try:

@@ -733,5 +733,112 @@ class JsonOnlyTest(unittest.TestCase):
         self.assertFalse(opts.json_only)
 
 
+class CrtShTest(unittest.TestCase):
+    def test_skips_free_providers(self):
+        result = runner.run_crt_sh("gmail.com", Path(tempfile.mkdtemp()))
+        self.assertIsNone(result)
+
+    def test_returns_empty_on_no_data(self):
+        with patch("osint_runner.http_get_json", return_value=None):
+            result = runner.run_crt_sh("custom-domain.fr", Path(tempfile.mkdtemp()))
+        self.assertEqual(result.domain, "custom-domain.fr")
+        self.assertEqual(result.certificates, [])
+
+    def test_parses_crt_response(self):
+        fake_data = [
+            {"id": 1, "common_name": "custom-domain.fr", "name_value": "custom-domain.fr",
+             "not_before": "2020-01-15T00:00:00", "issuer_name": "Let's Encrypt"},
+            {"id": 2, "common_name": "www.custom-domain.fr", "name_value": "www.custom-domain.fr\nmail.custom-domain.fr",
+             "not_before": "2023-06-01T00:00:00", "issuer_name": "Let's Encrypt"},
+        ]
+        with patch("osint_runner.http_get_json", return_value=fake_data):
+            result = runner.run_crt_sh("custom-domain.fr", Path(tempfile.mkdtemp()))
+        self.assertEqual(result.domain, "custom-domain.fr")
+        self.assertEqual(len(result.certificates), 2)
+        self.assertIn("www.custom-domain.fr", result.subdomains)
+        self.assertIn("mail.custom-domain.fr", result.subdomains)
+        self.assertEqual(result.earliest_cert, "2020-01-15")
+        self.assertEqual(result.latest_cert, "2023-06-01")
+
+    def test_dataclass_fields(self):
+        r = runner.CrtShResult(domain="test.fr")
+        self.assertEqual(r.domain, "test.fr")
+        self.assertEqual(r.certificates, [])
+        self.assertEqual(r.subdomains, [])
+
+
+class GitHubEnrichmentTest(unittest.TestCase):
+    def test_returns_none_on_404(self):
+        with patch("osint_runner.http_get_json", return_value=None):
+            result = runner.run_github_enrichment("nonexistent_user_xyz", Path(tempfile.mkdtemp()))
+        self.assertIsNone(result)
+
+    def test_parses_github_response(self):
+        fake = {
+            "login": "jdupont", "name": "Jean Dupont", "bio": "Developer",
+            "location": "Paris", "company": "ACME", "blog": "https://jdupont.dev",
+            "public_repos": 42, "followers": 100, "following": 50,
+            "created_at": "2015-03-20T10:00:00Z", "email": "jean@example.com",
+            "twitter_username": "jdupont_dev",
+        }
+        with patch("osint_runner.http_get_json", return_value=fake):
+            result = runner.run_github_enrichment("jdupont", Path(tempfile.mkdtemp()))
+        self.assertEqual(result.username, "jdupont")
+        self.assertEqual(result.name, "Jean Dupont")
+        self.assertEqual(result.location, "Paris")
+        self.assertEqual(result.public_repos, 42)
+        self.assertEqual(result.followers, 100)
+        self.assertEqual(result.twitter_username, "jdupont_dev")
+        self.assertEqual(result.created_at, "2015-03-20")
+
+    def test_dataclass_defaults(self):
+        gp = runner.GitHubProfile(username="test")
+        self.assertEqual(gp.name, "")
+        self.assertEqual(gp.public_repos, 0)
+
+
+class AgeEstimationTest(unittest.TestCase):
+    def test_dd_mm_yyyy(self):
+        age, iso = runner.compute_age("15/06/1990")
+        self.assertIsNotNone(age)
+        self.assertGreater(age, 30)
+        self.assertEqual(iso, "1990-06-15")
+
+    def test_yyyy_mm_dd(self):
+        age, iso = runner.compute_age("1990-06-15")
+        self.assertIsNotNone(age)
+        self.assertEqual(iso, "1990-06-15")
+
+    def test_none_input(self):
+        age, iso = runner.compute_age(None)
+        self.assertIsNone(age)
+        self.assertIsNone(iso)
+
+    def test_empty_string(self):
+        age, iso = runner.compute_age("")
+        self.assertIsNone(age)
+        self.assertIsNone(iso)
+
+    def test_invalid_format(self):
+        age, iso = runner.compute_age("not-a-date")
+        self.assertIsNone(age)
+        self.assertIsNone(iso)
+
+    def test_dot_format(self):
+        age, iso = runner.compute_age("15.06.1990")
+        self.assertIsNotNone(age)
+        self.assertEqual(iso, "1990-06-15")
+
+
+class SkipNewModulesTest(unittest.TestCase):
+    def test_skip_crt(self):
+        opts = runner.parse_args(["-m", "M1", "-e", "a@b.com", "--skip", "crt"])
+        self.assertIn("crt", opts.skip)
+
+    def test_skip_github(self):
+        opts = runner.parse_args(["-m", "M1", "-e", "a@b.com", "--skip", "github"])
+        self.assertIn("github", opts.skip)
+
+
 if __name__ == "__main__":
     unittest.main()

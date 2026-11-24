@@ -34,13 +34,26 @@ def export_breaches_csv(report_dir, breaches):
     return path
 
 
-def export_summary_csv(report_dir, opts, findings, breaches, companies, phone_infos):
+def export_companies_csv(report_dir, companies):
+    """Export companies to CSV."""
+    path = report_dir / "entreprises.csv"
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["Nom", "SIREN", "Role", "Statut", "Adresse", "Date creation", "Source"])
+        for c in companies:
+            writer.writerow([c.name, c.siren, c.role, c.status, c.address, c.creation_date, c.source])
+    return path
+
+
+def export_summary_csv(report_dir, opts, findings, breaches, companies, phone_infos,
+                       risk_score=None, risk_level=None):
     """Export a one-row summary CSV."""
     path = report_dir / "resume.csv"
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["Mandat", "Nom", "Emails", "Pseudos", "Telephones",
-                          "Nb comptes", "Nb fuites", "Nb entreprises"])
+                          "Nb comptes", "Nb fuites", "Nb entreprises",
+                          "Score risque", "Niveau risque"])
         writer.writerow([
             opts.mandat,
             opts.nom or "",
@@ -50,5 +63,7 @@ def export_summary_csv(report_dir, opts, findings, breaches, companies, phone_in
             len(findings),
             len(breaches),
             len(companies),
+            risk_score if risk_score is not None else "",
+            risk_level or "",
         ])
     return path
