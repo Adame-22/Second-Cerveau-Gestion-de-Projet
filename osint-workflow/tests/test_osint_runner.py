@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import osint_runner as runner
@@ -79,6 +80,70 @@ class ArgsTest(unittest.TestCase):
         opts = runner.parse_args(["-m", "M1", "-u", "bob", "-u", "bob_2", "-e", "a.b+c@mail.fr"])
         self.assertEqual(opts.username, ["bob", "bob_2"])
         self.assertEqual(opts.email, ["a.b+c@mail.fr"])
+
+    def test_accepts_phone(self):
+        opts = runner.parse_args(["-m", "M1", "-p", "+33612345678", "-e", "a@b.com"])
+        self.assertEqual(opts.phone, ["+33612345678"])
+
+    def test_rejects_invalid_phone(self):
+        with self.assertRaises(SystemExit):
+            runner.parse_args(["-m", "M1", "-p", "abc"])
+
+
+class PhoneTest(unittest.TestCase):
+    def test_phone_lookup_valid_french(self):
+        info = runner.run_phone_lookup("+33612345678")
+        self.assertTrue(info.valid)
+        self.assertIn("France", info.country)
+        self.assertEqual(info.line_type, "mobile")
+
+    def test_phone_lookup_invalid(self):
+        info = runner.run_phone_lookup("+0000000")
+        self.assertFalse(info.valid)
+
+
+class CompanySearchTest(unittest.TestCase):
+    def test_build_google_dorks_with_name(self):
+        dorks = runner.build_google_dorks(nom="Jean Dupont", emails=["j@test.com"])
+        labels = [d["label"] for d in dorks]
+        self.assertIn("Nom complet", labels)
+        self.assertIn("Nom + LinkedIn", labels)
+        self.assertIn("Email j@test.com", labels)
+        for d in dorks:
+            self.assertIn("url", d)
+            self.assertTrue(d["url"].startswith("https://"))
+
+    def test_build_google_dorks_empty(self):
+        dorks = runner.build_google_dorks()
+        self.assertEqual(dorks, [])
+
+
+class WhoisTest(unittest.TestCase):
+    def test_whois_skips_free_providers(self):
+        import tempfile
+        raw_dir = Path(tempfile.mkdtemp())
+        result = runner.run_whois_lookup("test@gmail.com", raw_dir)
+        self.assertIsNone(result)
+
+
+class ProfileExtractTest(unittest.TestCase):
+    def test_extracts_profile_fields(self):
+        runs = [
+            runner.ToolRun("maigret", "bob", True, findings=[
+                runner.Finding("bob", "username", "GitHub", "", ["maigret"],
+                               {"fullname": "Bob Smith", "location": "Paris", "bio": "Developer"}),
+                runner.Finding("bob", "username", "GitLab", "", ["maigret"],
+                               {"fullname": "Bob Smith", "company": "ACME"}),
+            ]),
+            runner.ToolRun("sherlock", "bob", True, findings=[
+                runner.Finding("bob", "username", "Twitter", "", ["sherlock"], {}),
+            ]),
+        ]
+        details = runner.extract_profile_details(runs)
+        self.assertEqual(details["fullname"], ["Bob Smith"])
+        self.assertEqual(details["location"], ["Paris"])
+        self.assertEqual(details["company"], ["ACME"])
+        self.assertNotIn("age", details)
 
 
 if __name__ == "__main__":
