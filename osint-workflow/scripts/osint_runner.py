@@ -562,6 +562,16 @@ def build_social_profile_urls(usernames=None, emails=None, phones=None):
             {"platform": "Flickr", "url": f"https://www.flickr.com/people/{q}", "type": "photo"},
             {"platform": "Snapchat", "url": f"https://www.snapchat.com/add/{q}", "type": "social"},
             {"platform": "Telegram", "url": f"https://t.me/{q}", "type": "messagerie"},
+            {"platform": "Discord (lookup)", "url": f"https://discord.id/?prefill={q}", "type": "gaming"},
+            {"platform": "Steam", "url": f"https://steamcommunity.com/id/{q}", "type": "gaming"},
+            {"platform": "Spotify", "url": f"https://open.spotify.com/user/{q}", "type": "musique"},
+            {"platform": "SoundCloud", "url": f"https://soundcloud.com/{q}", "type": "musique"},
+            {"platform": "Vinted", "url": f"https://www.vinted.fr/member/{q}", "type": "marketplace_fr"},
+            {"platform": "Leboncoin (recherche)", "url": f"https://www.leboncoin.fr/recherche?text={q}", "type": "marketplace_fr"},
+            {"platform": "Skool", "url": f"https://www.skool.com/@{q}", "type": "communaute"},
+            {"platform": "Linktree", "url": f"https://linktr.ee/{q}", "type": "personnel"},
+            {"platform": "Behance", "url": f"https://www.behance.net/{q}", "type": "creatif"},
+            {"platform": "Dribbble", "url": f"https://dribbble.com/{q}", "type": "creatif"},
         ])
     for email in (emails or []):
         local = email.split("@")[0]
@@ -569,6 +579,14 @@ def build_social_profile_urls(usernames=None, emails=None, phones=None):
         urls.extend([
             {"platform": "Gravatar (email)", "url": f"https://gravatar.com/{q}", "type": "avatar"},
             {"platform": "About.me", "url": f"https://about.me/{q}", "type": "personnel"},
+        ])
+    for phone in (phones or []):
+        pq = urllib.parse.quote(phone)
+        urls.extend([
+            {"platform": "Truecaller", "url": f"https://www.truecaller.com/search/fr/{pq}", "type": "annuaire_inverse"},
+            {"platform": "Sync.me", "url": f"https://sync.me/search/?number={pq}", "type": "annuaire_inverse"},
+            {"platform": "Whocalld", "url": f"https://whocalld.com/+{pq.lstrip('%2B').lstrip('+')}", "type": "annuaire_inverse"},
+            {"platform": "NumeroInverse.com", "url": f"https://www.numeroinverse.com/numero-de-telephone/{pq.lstrip('%2B').lstrip('+')}", "type": "annuaire_inverse_fr"},
         ])
     return urls
 
@@ -790,6 +808,127 @@ def run_dns_lookup(domain, raw_dir):
         json.dumps(asdict(result), indent=2, ensure_ascii=False), encoding="utf-8"
     )
     return result
+
+
+# --- Certificate Transparency (crt.sh, free, no key) ---
+
+@dataclass
+class CrtShResult:
+    domain: str
+    certificates: list = field(default_factory=list)
+    subdomains: list = field(default_factory=list)
+    earliest_cert: str = ""
+    latest_cert: str = ""
+
+
+def run_crt_sh(domain, raw_dir):
+    """Query crt.sh Certificate Transparency logs for a domain."""
+    if domain in FREE_EMAIL_PROVIDERS:
+        return None
+    work_dir = raw_dir / "crtsh"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    url = f"https://crt.sh/?q=%25.{urllib.parse.quote(domain)}&output=json"
+    data = http_get_json(url, timeout=20, retries=1)
+    if not data or not isinstance(data, list):
+        return CrtShResult(domain=domain)
+    certs = []
+    subdomains = set()
+    dates = []
+    seen_ids = set()
+    for entry in data[:200]:
+        cert_id = entry.get("id")
+        if cert_id in seen_ids:
+            continue
+        seen_ids.add(cert_id)
+        common_name = entry.get("common_name", "")
+        name_value = entry.get("name_value", "")
+        not_before = entry.get("not_before", "")[:10]
+        issuer = entry.get("issuer_name", "")
+        certs.append({"id": cert_id, "common_name": common_name, "issuer": issuer, "not_before": not_before})
+        if not_before:
+            dates.append(not_before)
+        for name in name_value.split("\n"):
+            name = name.strip().lstrip("*.")
+            if name and name != domain and name.endswith(domain):
+                subdomains.add(name)
+    dates.sort()
+    result = CrtShResult(
+        domain=domain,
+        certificates=certs[:50],
+        subdomains=sorted(subdomains),
+        earliest_cert=dates[0] if dates else "",
+        latest_cert=dates[-1] if dates else "",
+    )
+    (work_dir / f"crtsh_{safe_name(domain)}.json").write_text(
+        json.dumps(asdict(result), indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    return result
+
+
+# --- GitHub public enrichment (no API key, rate-limited) ---
+
+@dataclass
+class GitHubProfile:
+    username: str
+    name: str = ""
+    bio: str = ""
+    location: str = ""
+    company: str = ""
+    blog: str = ""
+    public_repos: int = 0
+    followers: int = 0
+    following: int = 0
+    created_at: str = ""
+    email: str = ""
+    twitter_username: str = ""
+
+
+def run_github_enrichment(username, raw_dir):
+    """Fetch public GitHub profile data (no API key, 60 req/h rate limit)."""
+    work_dir = raw_dir / "github"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    url = f"https://api.github.com/users/{urllib.parse.quote(username)}"
+    data = http_get_json(url, timeout=10, retries=1)
+    if not data or "login" not in data:
+        return None
+    profile = GitHubProfile(
+        username=data.get("login", username),
+        name=data.get("name", "") or "",
+        bio=data.get("bio", "") or "",
+        location=data.get("location", "") or "",
+        company=data.get("company", "") or "",
+        blog=data.get("blog", "") or "",
+        public_repos=data.get("public_repos", 0),
+        followers=data.get("followers", 0),
+        following=data.get("following", 0),
+        created_at=(data.get("created_at", "") or "")[:10],
+        email=data.get("email", "") or "",
+        twitter_username=data.get("twitter_username", "") or "",
+    )
+    (work_dir / f"github_{safe_name(username)}.json").write_text(
+        json.dumps(asdict(profile), indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    return profile
+
+
+# --- Age estimation from date of birth ---
+
+def compute_age(dob_str):
+    """Compute age from a DOB string (DD/MM/YYYY or YYYY-MM-DD). Returns (age, birth_date_iso) or (None, None)."""
+    if not dob_str:
+        return None, None
+    try:
+        for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%d.%m.%Y"):
+            try:
+                dt = datetime.strptime(dob_str.strip(), fmt)
+                today = datetime.now()
+                age = today.year - dt.year - ((today.month, today.day) < (dt.month, dt.day))
+                return age, dt.strftime("%Y-%m-%d")
+            except ValueError:
+                continue
+    except Exception:
+        pass
+    return None, None
 
 
 # --- Username permutation generator ---
@@ -1263,7 +1402,8 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
                    reputation_results=None, wayback_results=None, dns_results=None, paste_urls=None, identity_card=None,
                    username_permutations=None, risk_score=None, correlations=None, family_dorks=None,
                    data_classification=None, dark_web_urls=None,
-                   reverse_images=None, address_leaks=None, timeline=None):
+                   reverse_images=None, address_leaks=None, timeline=None,
+                   crt_sh_results=None, github_profiles=None, age_info=None):
     by_kind = {"username": [], "email": []}
     for finding in findings:
         by_kind[finding.kind].append(finding)
@@ -1291,7 +1431,7 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
         out.append(f"- **Telephone analyse :** {phone}")
 
     # --- Synthese executive ---
-    out += ["", "---", "", "## 1. Synthese executive", ""]
+    out += ["", "---", "", S("Synthese executive"), ""]
     total_accounts = len(findings)
     total_breaches = len(breaches)
     total_companies = len(companies)
@@ -1367,7 +1507,7 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
 
     # --- Profil synthetique (extracted from Maigret) ---
     if profile_details:
-        out += ["", "## 2. Profil synthetique (extrait des comptes trouves)", ""]
+        out += ["", S("Profil synthetique (extrait des comptes trouves)"), ""]
         out.append("| Information | Valeurs trouvees |")
         out.append("|---|---|")
         labels = {
@@ -1380,21 +1520,21 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
             if key in profile_details:
                 out.append(f"| {label} | {cell(', '.join(profile_details[key]))} |")
     else:
-        out += ["", "## 2. Profil synthetique", "", "Aucune information de profil extraite des comptes trouves."]
+        out += ["", S("Profil synthetique"), "", "Aucune information de profil extraite des comptes trouves."]
 
     # --- Phone analysis ---
     if phone_infos:
-        out += ["", "## 3. Analyse des numeros de telephone", ""]
+        out += ["", S("Analyse des numeros de telephone"), ""]
         out.append("| Numero | Valide | Pays | Operateur | Type | Region |")
         out.append("|---|---|---|---|---|---|")
         for pi in phone_infos:
             out.append(f"| {cell(pi.number)} | {'oui' if pi.valid else 'non'} | {cell(pi.country)} | {cell(pi.carrier)} | {cell(pi.line_type)} | {cell(pi.region)} |")
     else:
-        out += ["", "## 3. Analyse des numeros de telephone", "", "Aucun numero fourni."]
+        out += ["", S("Analyse des numeros de telephone"), "", "Aucun numero fourni."]
 
     # --- Breaches ---
     if breaches:
-        out += ["", "## 4. Fuites de donnees (data breaches)", ""]
+        out += ["", S("Fuites de donnees (data breaches)"), ""]
         out.append(f"**{len(breaches)} fuite(s) trouvee(s).** Les donnees suivantes ont ete exposees :")
         out.append("")
         out.append("| Email | Fuite | Date | Donnees exposees |")
@@ -1405,11 +1545,11 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
         out.append("")
         out.append("**Risques :** mots de passe potentiellement compromis, vol d'identite, usurpation, phishing cible.")
     else:
-        out += ["", "## 4. Fuites de donnees", "", "Aucune fuite connue trouvee (via les sources gratuites interrogees)."]
+        out += ["", S("Fuites de donnees"), "", "Aucune fuite connue trouvee (via les sources gratuites interrogees)."]
 
     # --- Companies ---
     if companies:
-        out += ["", "## 5. Entreprises et registres publics", ""]
+        out += ["", S("Entreprises et registres publics"), ""]
         out.append(f"**{len(companies)} entreprise(s) liee(s) au nom fourni :**")
         out.append("")
         out.append("| Entreprise | SIREN | Role | Statut | Adresse | Creation | Source |")
@@ -1420,12 +1560,12 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
         out.append("**Risques :** l'adresse du siege peut reveler une adresse personnelle (domiciliation a domicile)."
                     " Les registres publics (Pappers, Infogreffe, societe.com) sont accessibles a tous.")
     else:
-        out += ["", "## 5. Entreprises et registres publics", "", "Aucune entreprise trouvee au nom fourni (recherche France uniquement)."]
+        out += ["", S("Entreprises et registres publics"), "", "Aucune entreprise trouvee au nom fourni (recherche France uniquement)."]
 
     # --- WHOIS ---
     whois_found = [w for w in whois_results if w is not None]
     if whois_found:
-        out += ["", "## 6. Domaines email (WHOIS)", ""]
+        out += ["", S("Domaines email (WHOIS)"), ""]
         for w in whois_found:
             out.append(f"### {w['domain']}")
             out.append("")
@@ -1450,12 +1590,12 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
             out.append("")
             out.append("**Risque :** un domaine personnel peut exposer le nom, l'adresse et le telephone du proprietaire via WHOIS.")
     else:
-        out += ["", "## 6. Domaines email (WHOIS)", "", "Emails heberges sur des fournisseurs publics (aucun domaine personnel detecte)."]
+        out += ["", S("Domaines email (WHOIS)"), "", "Emails heberges sur des fournisseurs publics (aucun domaine personnel detecte)."]
 
     # --- Email reputation ---
     rep_valid = [r for r in (reputation_results or []) if not r.get("error")]
     if rep_valid:
-        out += ["", "## 7. Reputation des emails", ""]
+        out += ["", S("Reputation des emails"), ""]
         out.append("| Email | Reputation | Suspect | Credentials leaked | Data breach | Blacklisted | Profils detectes | Premiere apparition |")
         out.append("|---|---|---|---|---|---|---|---|")
         for r in rep_valid:
@@ -1468,10 +1608,10 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
         out.append("")
         out.append("**Risque :** un email avec une mauvaise reputation ou marque comme suspect peut etre cible par des campagnes de phishing.")
     else:
-        out += ["", "## 7. Reputation des emails", "", "Reputation non disponible (API emailrep.io non joignable ou module desactive)."]
+        out += ["", S("Reputation des emails"), "", "Reputation non disponible (API emailrep.io non joignable ou module desactive)."]
 
     # --- Tool scan details ---
-    out += ["", "## 8. Detail des scans", ""]
+    out += ["", S("Detail des scans"), ""]
     out.append("| Outil | Identifiant | Etat | Comptes | Couverture |")
     out.append("|---|---|---|---|---|")
     for run in runs:
@@ -1480,14 +1620,14 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
 
     # --- Accounts found ---
     if by_kind["username"]:
-        out += ["", "## 9. Comptes trouves a partir des pseudos", "",
+        out += ["", S("Comptes trouves a partir des pseudos"), "",
                 "| Pseudo | Site | Lien | Vu par | Informations visibles |", "|---|---|---|---|---|"]
         for f in by_kind["username"]:
             infos = ", ".join(f"{k}: {v}" for k, v in f.details.items()) or "-"
             out.append(f"| {cell(f.identifier)} | {cell(f.site)} | {f.url} | {', '.join(f.sources)} | {cell(infos)} |")
 
     if by_kind["email"]:
-        out += ["", "## 10. Services ou l'email est inscrit", "",
+        out += ["", S("Services ou l'email est inscrit"), "",
                 "| Email | Service | Indices divulgues par le service |", "|---|---|---|"]
         for f in by_kind["email"]:
             infos = ", ".join(f"{k}: {v}" for k, v in f.details.items()) or "-"
@@ -1495,13 +1635,13 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
 
     # --- Leads ---
     if leads:
-        out += ["", "## 11. Autres identifiants / proches reperes", "",
+        out += ["", S("Autres identifiants / proches reperes"), "",
                 "Identifiants supplementaires trouves sur les profils. A confirmer avec le client :", ""]
         out += [f"- {lead}" for lead in leads]
 
     # --- Google dorks ---
     if dorks:
-        out += ["", "## 12. Pistes de recherche manuelle (Google dorks)", "",
+        out += ["", S("Pistes de recherche manuelle (Google dorks)"), "",
                 "Liens a ouvrir manuellement pour approfondir l'investigation :", ""]
         out.append("| Recherche | Lien |")
         out.append("|---|---|")
@@ -1511,7 +1651,7 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
     # --- Username permutations ---
     _perms = username_permutations or []
     if _perms:
-        out += ["", "## 13. Pistes de pseudos supplementaires (permutations)", "",
+        out += ["", S("Pistes de pseudos supplementaires (permutations)"), "",
                 "Pseudos generes automatiquement a partir du nom et des identifiants connus. "
                 "A verifier manuellement ou lors d'un approfondissement :", ""]
         for i in range(0, len(_perms), 5):
@@ -1523,7 +1663,7 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
     # --- Paste / leak search URLs ---
     _paste_urls = paste_urls or []
     if _paste_urls:
-        out += ["", "## 14. Recherche dans les pastes et bases de fuites", "",
+        out += ["", S("Recherche dans les pastes et bases de fuites"), "",
                 "Liens a ouvrir manuellement pour chercher des traces dans les pastes et bases de fuites :", ""]
         out.append("| Recherche | Lien |")
         out.append("|---|---|")
@@ -1533,7 +1673,7 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
     # --- DNS enumeration ---
     _dns = dns_results or []
     if _dns:
-        out += ["", "## 15. Analyse DNS des domaines email personnels", ""]
+        out += ["", S("Analyse DNS des domaines email personnels"), ""]
         for dr in _dns:
             out.append(f"### {dr.domain}")
             out.append("")
@@ -1558,7 +1698,7 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
     _wb = wayback_results or []
     archived = [r for r in _wb if r.total_snapshots > 0]
     if archived:
-        out += ["", "## 16. Historique web (Wayback Machine)", ""]
+        out += ["", S("Historique web (Wayback Machine)"), ""]
         out.append("Profils ayant des archives dans la Wayback Machine (web.archive.org) :")
         out.append("")
         out.append("| URL | Plus ancien | Plus recent | Nb snapshots |")
@@ -1571,13 +1711,13 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
 
     # --- Social profile direct links ---
     if "social" not in opts.skip:
-        social_urls = build_social_profile_urls(opts.username, opts.email)
+        social_urls = build_social_profile_urls(opts.username, opts.email, opts.phone)
         if social_urls:
-            out += ["", "## 17. Liens directs vers les profils (verification manuelle)", ""]
+            out += ["", S("Liens directs vers les profils (verification manuelle)"), ""]
             out.append("Liens a ouvrir manuellement pour verifier l'existence de profils sur les plateformes majeures :")
             out.append("")
-            types_order = ["professionnel", "social", "developpeur", "forum", "video", "streaming",
-                           "blog", "photo", "messagerie", "securite", "avatar", "personnel"]
+            types_order = ["professionnel", "social", "developpeur", "forum", "video", "streaming", "gaming", "musique",
+                           "blog", "photo", "messagerie", "securite", "avatar", "personnel", "marketplace_fr", "annuaire_inverse", "annuaire_inverse_fr", "communaute", "creatif"]
             for ptype in types_order:
                 group = [u for u in social_urls if u["type"] == ptype]
                 if group:
@@ -1610,7 +1750,7 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
     # --- Family search dorks ---
     _fam = family_dorks or []
     if _fam:
-        out += ["", "## 18. Recherche famille et proches (Google dorks)", "",
+        out += ["", S("Recherche famille et proches (Google dorks)"), "",
                 "Liens a ouvrir manuellement pour rechercher des proches, liens familiaux et registres civils :", ""]
         out.append("| Recherche | Lien |")
         out.append("|---|---|")
@@ -1621,7 +1761,7 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
     _dc = data_classification or {}
     has_classified = any(_dc.get(k) for k in ("CRITIQUE", "ELEVE", "MOYEN", "FAIBLE"))
     if has_classified:
-        out += ["", "## 19. Classification des donnees exposees", "",
+        out += ["", S("Classification des donnees exposees"), "",
                 "Inventaire des types de donnees exposees, classes par niveau de sensibilite :", ""]
         out.append("| Niveau | Type de donnee | Source | Date |")
         out.append("|---|---|---|---|")
@@ -1632,7 +1772,7 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
     # --- Dark web / leak database links ---
     _dw = dark_web_urls or []
     if _dw:
-        out += ["", "## 20. Verification dark web / bases de fuites", "",
+        out += ["", S("Verification dark web / bases de fuites"), "",
                 "Liens a ouvrir manuellement pour verifier l'exposition dans les bases de donnees de fuites et le dark web :", ""]
         out.append("| Service | Identifiant | Type | Lien |")
         out.append("|---|---|---|---|")
@@ -1642,7 +1782,7 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
     # --- Address / location leak detection ---
     _addr = address_leaks or []
     if _addr:
-        out += ["", "## 21. Detection d'exposition d'adresse / localisation", "",
+        out += ["", S("Detection d'exposition d'adresse / localisation"), "",
                 "Croisement de toutes les sources pour detecter les fuites d'adresse et de localisation :", ""]
         out.append("| Source | Type | Detail | Severite |")
         out.append("|---|---|---|---|")
@@ -1652,7 +1792,7 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
     # --- Exposure timeline ---
     _tl = timeline or []
     if _tl:
-        out += ["", "## 22. Chronologie d'exposition", "",
+        out += ["", S("Chronologie d'exposition"), "",
                 "Evenements d'exposition classes par date :", ""]
         out.append("| Date | Type | Detail | Severite |")
         out.append("|---|---|---|---|")
@@ -1662,12 +1802,72 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
     # --- Reverse image search ---
     _ri = reverse_images or []
     if _ri:
-        out += ["", "## 23. Recherche d'image inversee", "",
+        out += ["", S("Recherche d'image inversee"), "",
                 "Liens pour effectuer une recherche d'image inversee sur les avatars connus :", ""]
         out.append("| Plateforme | Image | Google Lens | TinEye | Yandex |")
         out.append("|---|---|---|---|---|")
         for img in _ri:
             out.append(f"| {cell(img['platform'])} | [Voir]({img['image_url']}) | [Rechercher]({img['google_lens']}) | [Rechercher]({img['tineye']}) | [Rechercher]({img['yandex']}) |")
+
+    # --- Certificate Transparency ---
+    _crt = crt_sh_results or []
+    if _crt:
+        out += ["", S("Transparence des certificats (crt.sh)"), "",
+                "Certificats TLS/SSL trouves dans les logs de Certificate Transparency :", ""]
+        for cr in _crt:
+            out.append(f"### Domaine : {cr.domain}")
+            out.append("")
+            if cr.earliest_cert:
+                out.append(f"- Premier certificat : **{cr.earliest_cert}**")
+            if cr.latest_cert:
+                out.append(f"- Dernier certificat : **{cr.latest_cert}**")
+            out.append(f"- Nombre de certificats : **{len(cr.certificates)}**")
+            if cr.subdomains:
+                out.append(f"- Sous-domaines decouverts : **{len(cr.subdomains)}**")
+                out.append("")
+                out.append("| Sous-domaine |")
+                out.append("|---|")
+                for sub in cr.subdomains[:30]:
+                    out.append(f"| {cell(sub)} |")
+            out.append("")
+
+    # --- GitHub enrichment ---
+    _gh = github_profiles or []
+    if _gh:
+        out += ["", S("Enrichissement GitHub"), "",
+                "Donnees publiques extraites des profils GitHub trouves :", ""]
+        for gp in _gh:
+            out.append(f"### @{gp.username}")
+            out.append("")
+            out.append(f"| Champ | Valeur |")
+            out.append(f"|---|---|")
+            if gp.name:
+                out.append(f"| Nom | {cell(gp.name)} |")
+            if gp.bio:
+                out.append(f"| Bio | {cell(gp.bio)} |")
+            if gp.location:
+                out.append(f"| Localisation | {cell(gp.location)} |")
+            if gp.company:
+                out.append(f"| Entreprise | {cell(gp.company)} |")
+            if gp.blog:
+                out.append(f"| Site web | [{cell(gp.blog)}]({gp.blog if gp.blog.startswith('http') else 'https://' + gp.blog}) |")
+            if gp.email:
+                out.append(f"| Email public | {cell(gp.email)} |")
+            if gp.twitter_username:
+                out.append(f"| Twitter/X | [@{cell(gp.twitter_username)}](https://twitter.com/{gp.twitter_username}) |")
+            out.append(f"| Repos publics | {gp.public_repos} |")
+            out.append(f"| Followers | {gp.followers} |")
+            out.append(f"| Following | {gp.following} |")
+            if gp.created_at:
+                out.append(f"| Compte cree le | {gp.created_at} |")
+            out.append("")
+
+    # --- Age estimation ---
+    if age_info and age_info[0] is not None:
+        out += ["", S("Estimation d'age"), "",
+                f"- Date de naissance fournie : **{age_info[1]}**",
+                f"- Age estime : **{age_info[0]} ans**",
+                ""]
 
     # --- Action plan ---
     _rs = risk_score if risk_score is not None else 0
@@ -1903,6 +2103,22 @@ def main(argv=None):
                     seen_domains.add(domain)
                     dns_futures.append(pool.submit(run_dns_lookup, domain, raw_dir))
 
+        # Certificate Transparency (crt.sh)
+        crt_futures = []
+        if "crt" not in opts.skip:
+            seen_domains_crt = set()
+            for email in opts.email:
+                domain = email.split("@", 1)[1].lower()
+                if domain not in seen_domains_crt:
+                    seen_domains_crt.add(domain)
+                    crt_futures.append(pool.submit(run_crt_sh, domain, raw_dir))
+
+        # GitHub enrichment
+        github_futures = []
+        if "github" not in opts.skip:
+            for username in opts.username:
+                github_futures.append(pool.submit(run_github_enrichment, username, raw_dir))
+
         for f in breach_futures:
             result = f.result()
             breaches.extend(result)
@@ -1938,6 +2154,20 @@ def main(argv=None):
                 dns_results.append(dr)
                 hints = ", ".join(dr.hosting_hints) if dr.hosting_hints else "aucun indice"
                 log(f"  [INFO] DNS {dr.domain} : MX={len(dr.mx_records)}, {hints}")
+
+        crt_sh_results = []
+        for f in crt_futures:
+            cr = f.result()
+            if cr:
+                crt_sh_results.append(cr)
+                log(f"  [INFO] crt.sh {cr.domain} : {len(cr.certificates)} cert(s), {len(cr.subdomains)} sous-domaine(s)")
+
+        github_profiles = []
+        for f in github_futures:
+            gp = f.result()
+            if gp:
+                github_profiles.append(gp)
+                log(f"  [INFO] GitHub @{gp.username} : {gp.public_repos} repos, {gp.followers} followers")
 
     # Wayback Machine (runs after Phase 2 pool, uses profile URLs found)
     wayback_results = []
@@ -1987,6 +2217,7 @@ def main(argv=None):
     reverse_images = build_reverse_image_search_urls(opts.username, opts.email)
     address_leaks = detect_address_leaks(breaches, whois_results, profile_details, companies)
     timeline = build_exposure_timeline(breaches, wayback_results, findings, companies)
+    age_info = compute_age(getattr(opts, "dob", None))
 
     elapsed = datetime.now() - started
 
@@ -2028,6 +2259,9 @@ def main(argv=None):
                 "reverse_images": reverse_images,
                 "address_leaks": address_leaks,
                 "timeline": timeline,
+                "crt_sh": [asdict(c) for c in crt_sh_results],
+                "github_profiles": [asdict(g) for g in github_profiles],
+                "age_info": {"age": age_info[0], "dob_iso": age_info[1]} if age_info[0] else None,
             },
             indent=2, ensure_ascii=False,
         ),
