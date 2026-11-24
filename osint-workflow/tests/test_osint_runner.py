@@ -550,5 +550,188 @@ class CsvExportTest(unittest.TestCase):
         self.assertEqual(len(lines), 3)  # header + 2 rows
 
 
+
+class ClassifyExposedDataTest(unittest.TestCase):
+    def test_classifies_breach_data_types(self):
+        breach = runner.BreachInfo(
+            email="a@b.com", breach_name="TestBreach",
+            breach_date="2024-01-01", data_types=["Passwords", "Email addresses", "Phone numbers", "Usernames"])
+        result = runner.classify_exposed_data([breach], [], [], [])
+        self.assertEqual(len(result["CRITIQUE"]), 1)
+        self.assertEqual(result["CRITIQUE"][0]["type"], "Passwords")
+        self.assertEqual(len(result["ELEVE"]), 1)
+        self.assertEqual(result["ELEVE"][0]["type"], "Phone numbers")
+        self.assertEqual(len(result["MOYEN"]), 1)
+        self.assertEqual(result["MOYEN"][0]["type"], "Email addresses")
+        self.assertEqual(len(result["FAIBLE"]), 1)
+        self.assertEqual(result["FAIBLE"][0]["type"], "Usernames")
+
+    def test_classifies_whois_exposure(self):
+        whois = [{"domain": "test.com", "registrant_name": "John", "registrant_address": "123 Rue X"}]
+        result = runner.classify_exposed_data([], whois, [], [])
+        self.assertEqual(len(result["MOYEN"]), 1)
+        self.assertEqual(len(result["ELEVE"]), 1)
+
+    def test_classifies_reputation_leaked(self):
+        rep = [{"email": "a@b.com", "credentials_leaked": True}]
+        result = runner.classify_exposed_data([], [], rep, [])
+        self.assertEqual(len(result["CRITIQUE"]), 1)
+        self.assertIn("Credentials leaked", result["CRITIQUE"][0]["type"])
+
+    def test_classifies_public_accounts(self):
+        findings = [runner.Finding(identifier="a@b.com", kind="email", site="twitter")]
+        result = runner.classify_exposed_data([], [], [], findings)
+        self.assertEqual(len(result["FAIBLE"]), 1)
+        self.assertIn("comptes publics", result["FAIBLE"][0]["type"])
+
+    def test_empty_inputs(self):
+        result = runner.classify_exposed_data([], [], [], [])
+        self.assertEqual(result["CRITIQUE"], [])
+        self.assertEqual(result["ELEVE"], [])
+        self.assertEqual(result["MOYEN"], [])
+        self.assertEqual(result["FAIBLE"], [])
+
+
+class DarkWebCheckTest(unittest.TestCase):
+    def test_generates_email_urls(self):
+        urls = runner.build_dark_web_check_urls(emails=["test@example.com"])
+        self.assertTrue(len(urls) >= 5)
+        services = {u["service"] for u in urls}
+        self.assertIn("Have I Been Pwned", services)
+        self.assertIn("DeHashed", services)
+        self.assertIn("IntelligenceX", services)
+
+    def test_generates_phone_urls(self):
+        urls = runner.build_dark_web_check_urls(phones=["+33612345678"])
+        self.assertTrue(len(urls) >= 2)
+        services = {u["service"] for u in urls}
+        self.assertIn("Truecaller", services)
+
+    def test_generates_username_urls(self):
+        urls = runner.build_dark_web_check_urls(usernames=["johndoe"])
+        self.assertTrue(len(urls) >= 2)
+        services = {u["service"] for u in urls}
+        self.assertIn("NameCheckr", services)
+        self.assertIn("KnowEm", services)
+
+    def test_all_types(self):
+        urls = runner.build_dark_web_check_urls(
+            emails=["a@b.com"], phones=["+33600000000"], usernames=["user1"])
+        email_urls = [u for u in urls if u["type"] == "email"]
+        phone_urls = [u for u in urls if u["type"] == "phone"]
+        username_urls = [u for u in urls if u["type"] == "username"]
+        self.assertTrue(len(email_urls) >= 5)
+        self.assertTrue(len(phone_urls) >= 2)
+        self.assertTrue(len(username_urls) >= 2)
+
+    def test_empty_inputs(self):
+        urls = runner.build_dark_web_check_urls()
+        self.assertEqual(urls, [])
+
+class ReverseImageTest(unittest.TestCase):
+    def test_generates_gravatar_urls(self):
+        urls = runner.build_reverse_image_search_urls(emails=["test@example.com"])
+        self.assertEqual(len(urls), 1)
+        self.assertEqual(urls[0]["platform"], "Gravatar")
+        self.assertIn("gravatar.com/avatar/", urls[0]["image_url"])
+        self.assertIn("lens.google.com", urls[0]["google_lens"])
+        self.assertIn("tineye.com", urls[0]["tineye"])
+        self.assertIn("yandex.com", urls[0]["yandex"])
+
+    def test_generates_github_urls(self):
+        urls = runner.build_reverse_image_search_urls(usernames=["testuser"])
+        self.assertEqual(len(urls), 1)
+        self.assertEqual(urls[0]["platform"], "GitHub Avatar")
+        self.assertIn("github.com/testuser.png", urls[0]["image_url"])
+
+    def test_empty_inputs(self):
+        urls = runner.build_reverse_image_search_urls()
+        self.assertEqual(urls, [])
+
+    def test_combined(self):
+        urls = runner.build_reverse_image_search_urls(usernames=["u1"], emails=["e@x.com"])
+        self.assertEqual(len(urls), 2)
+
+
+class AddressLeakTest(unittest.TestCase):
+    def test_detects_breach_address(self):
+        breach = runner.BreachInfo(email="a@b.com", breach_name="Leak1", breach_date="2024-01-01",
+                                   data_types=["Physical addresses", "Email addresses"])
+        leaks = runner.detect_address_leaks([breach], [], {}, [])
+        self.assertEqual(len(leaks), 1)
+        self.assertEqual(leaks[0]["severity"], "ELEVE")
+        self.assertEqual(leaks[0]["type"], "adresse_physique")
+
+    def test_detects_whois_address(self):
+        whois = {"domain": "perso.com", "registrant_name": "Jean",
+                 "registrant_address": "1 rue X", "registrant_city": "Paris", "registrant_country": "FR"}
+        leaks = runner.detect_address_leaks([], [whois], {}, [])
+        self.assertEqual(len(leaks), 1)
+        self.assertEqual(leaks[0]["type"], "adresse_whois")
+
+    def test_detects_company_address(self):
+        company = runner.CompanyInfo(name="ACME", siren="123", address="10 rue Y 75001 Paris")
+        leaks = runner.detect_address_leaks([], [], {}, [company])
+        self.assertEqual(len(leaks), 1)
+        self.assertEqual(leaks[0]["type"], "siege_social")
+
+    def test_detects_profile_location(self):
+        profiles = {"city": ["Paris"], "country": ["France"]}
+        leaks = runner.detect_address_leaks([], [], profiles, [])
+        self.assertEqual(len(leaks), 2)
+
+    def test_empty_inputs(self):
+        leaks = runner.detect_address_leaks([], [], {}, [])
+        self.assertEqual(leaks, [])
+
+
+class ExposureTimelineTest(unittest.TestCase):
+    def test_builds_sorted_timeline(self):
+        b1 = runner.BreachInfo(email="a@b.com", breach_name="Early", breach_date="2018-01-01",
+                                data_types=["Passwords"])
+        b2 = runner.BreachInfo(email="a@b.com", breach_name="Late", breach_date="2023-06-01",
+                                data_types=["Email addresses"])
+        events = runner.build_exposure_timeline([b1, b2], [], [], [])
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0]["date"], "2018-01-01")
+        self.assertEqual(events[1]["date"], "2023-06-01")
+        self.assertEqual(events[0]["severity"], "ELEVE")
+        self.assertEqual(events[1]["severity"], "MOYEN")
+
+    def test_includes_companies(self):
+        c = runner.CompanyInfo(name="ACME", siren="123", creation_date="2020-01-01")
+        events = runner.build_exposure_timeline([], [], [], [c])
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["type"], "entreprise")
+
+    def test_empty_inputs(self):
+        events = runner.build_exposure_timeline([], [], [], [])
+        self.assertEqual(events, [])
+
+
+class QuietModeTest(unittest.TestCase):
+    def test_quiet_flag_parsed(self):
+        opts = runner.parse_args(["-m", "T", "-e", "a@b.com", "--quiet"])
+        self.assertTrue(opts.quiet)
+
+    def test_short_quiet_flag(self):
+        opts = runner.parse_args(["-m", "T", "-e", "a@b.com", "-q"])
+        self.assertTrue(opts.quiet)
+
+    def test_default_not_quiet(self):
+        opts = runner.parse_args(["-m", "T", "-e", "a@b.com"])
+        self.assertFalse(opts.quiet)
+
+
+class JsonOnlyTest(unittest.TestCase):
+    def test_json_only_flag_parsed(self):
+        opts = runner.parse_args(["-m", "T", "-e", "a@b.com", "--json-only"])
+        self.assertTrue(opts.json_only)
+
+    def test_default_not_json_only(self):
+        opts = runner.parse_args(["-m", "T", "-e", "a@b.com"])
+        self.assertFalse(opts.json_only)
+
+
 if __name__ == "__main__":
     unittest.main()

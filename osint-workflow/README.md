@@ -46,9 +46,13 @@ venv\Scripts\pip install -r requirements.txt
 | `--phone`, `-p` | Numero de telephone (repetable, format international recommande) |
 | `--nom`, `-n` | Nom complet (active la recherche d'entreprise, dorks famille, registres internationaux) |
 | `--all-sites` / `--top-sites N` | Etendue de la recherche Maigret (defaut : top 500) |
-| `--skip OUTIL` | Ne pas lancer un module : `holehe`, `sherlock`, `maigret`, `breach`, `company`, `whois`, `phone`, `reputation`, `wayback`, `dns`, `paste`, `social` |
+| `--prenom` | Prenom (ameliore les dorks famille/proches) |
+| `--dob JJ/MM/AAAA` | Date de naissance (active les dorks par age) |
+| `--skip OUTIL` | Ne pas lancer un module : `holehe`, `sherlock`, `maigret`, `breach`, `company`, `whois`, `phone`, `reputation`, `wayback`, `dns`, `paste`, `social`, `family` |
 | `--timeout`, `--tool-timeout` | Timeout par requete (10 s) et duree maximale par outil (1800 s) |
 | `--pdf` | Generer un export PDF en plus du Markdown (necessite `weasyprint`) |
+| `--json-only` | Generer uniquement `resultats.json` (pas de Markdown/PDF/CSV) |
+| `--quiet`, `-q` | Mode silencieux : supprime les messages de progression |
 | `--config CHEMIN` | Fichier config.json alternatif (cles API, options par defaut) |
 
 ## Rapport genere
@@ -113,9 +117,10 @@ Chaque audit cree `reports/<date>_<mandat>/` (jamais versionne) :
 | Reverse image | Pseudo/Email | Google Lens, TinEye, Yandex pour les avatars |
 | Classification | Toutes fuites | Tri des donnees exposees par sensibilite |
 | Correlation | Toutes sources | Croisement des identites entre sources |
-| Timeline | Toutes sources | Chronologie d'exposition |
+| Timeline | Toutes sources | Chronologie d'exposition triee |
 | Detection adresses | Toutes sources | Localisation geographique exposee |
 | Dark web check | Tous | Liens de verification manuelle sur bases de fuites |
+| Reverse image | Pseudo/Email | Recherche d'image inversee (Gravatar, GitHub) via Google Lens, TinEye, Yandex |
 
 Les scans de la phase 1 (comptes) et de la phase 2 (analyse approfondie) tournent en parallele.
 

@@ -573,6 +573,91 @@ def build_social_profile_urls(usernames=None, emails=None, phones=None):
     return urls
 
 
+def build_reverse_image_search_urls(usernames=None, emails=None):
+    """Generate reverse image search URLs for Gravatar and known profile image patterns."""
+    urls = []
+    if not usernames and not emails:
+        return urls
+    import hashlib
+    for email in (emails or []):
+        md5 = hashlib.md5(email.strip().lower().encode()).hexdigest()
+        gravatar_url = f"https://www.gravatar.com/avatar/{md5}?s=400&d=404"
+        urls.append({"platform": "Gravatar", "image_url": gravatar_url,
+                     "google_lens": f"https://lens.google.com/uploadbyurl?url={urllib.parse.quote(gravatar_url)}",
+                     "tineye": f"https://tineye.com/search?url={urllib.parse.quote(gravatar_url)}",
+                     "yandex": f"https://yandex.com/images/search?rpt=imageview&url={urllib.parse.quote(gravatar_url)}"})
+    for username in (usernames or []):
+        github_url = f"https://github.com/{username}.png"
+        urls.append({"platform": "GitHub Avatar", "image_url": github_url,
+                     "google_lens": f"https://lens.google.com/uploadbyurl?url={urllib.parse.quote(github_url)}",
+                     "tineye": f"https://tineye.com/search?url={urllib.parse.quote(github_url)}",
+                     "yandex": f"https://yandex.com/images/search?rpt=imageview&url={urllib.parse.quote(github_url)}"})
+    return urls
+
+
+def detect_address_leaks(breaches, whois_results, profile_details, companies):
+    """Cross-reference all data sources to detect address/location exposure."""
+    locations = []
+    seen = set()
+    for b in (breaches or []):
+        if "Physical addresses" in b.data_types:
+            key = f"breach:{b.breach_name}"
+            if key not in seen:
+                seen.add(key)
+                locations.append({"source": f"Fuite: {b.breach_name}", "type": "adresse_physique",
+                                  "detail": f"Adresse exposee dans la fuite {b.breach_name} ({b.breach_date})",
+                                  "severity": "ELEVE"})
+    for w in (whois_results or []):
+        if w and w.get("registrant_name"):
+            addr_parts = [w.get("registrant_address", ""), w.get("registrant_city", ""),
+                          w.get("registrant_country", "")]
+            addr = ", ".join(p for p in addr_parts if p)
+            if addr:
+                key = f"whois:{w['domain']}"
+                if key not in seen:
+                    seen.add(key)
+                    locations.append({"source": f"WHOIS: {w['domain']}", "type": "adresse_whois",
+                                      "detail": addr, "severity": "MOYEN"})
+    for c in (companies or []):
+        if c.address:
+            key = f"company:{c.siren}"
+            if key not in seen:
+                seen.add(key)
+                locations.append({"source": f"Entreprise: {c.name}", "type": "siege_social",
+                                  "detail": c.address, "severity": "FAIBLE"})
+    for key, vals in (profile_details or {}).items():
+        if key in ("city", "location", "country"):
+            for v in vals:
+                nk = f"profile:{key}:{v}"
+                if nk not in seen:
+                    seen.add(nk)
+                    locations.append({"source": "Profil en ligne", "type": "localisation_profil",
+                                      "detail": v, "severity": "FAIBLE"})
+    return locations
+
+
+def build_exposure_timeline(breaches, wayback_results, findings, companies):
+    """Build a chronological timeline of exposure events."""
+    events = []
+    for b in (breaches or []):
+        if b.breach_date:
+            events.append({"date": b.breach_date, "type": "fuite",
+                           "detail": f"Fuite {b.breach_name} : {', '.join(b.data_types[:3])}",
+                           "severity": "ELEVE" if any(t in b.data_types for t in ["Passwords", "Credit cards"]) else "MOYEN"})
+    for w in (wayback_results or []):
+        if w.oldest_snapshot:
+            events.append({"date": w.oldest_snapshot[:10] if len(w.oldest_snapshot) >= 10 else w.oldest_snapshot,
+                           "type": "archive", "detail": f"Premiere archive : {w.url[:60]}",
+                           "severity": "FAIBLE"})
+    for c in (companies or []):
+        if c.creation_date:
+            events.append({"date": c.creation_date, "type": "entreprise",
+                           "detail": f"Creation {c.name} (SIREN {c.siren})",
+                           "severity": "FAIBLE"})
+    events.sort(key=lambda e: e["date"])
+    return events
+
+
 # --- NEW: Wayback Machine check (CDX API, free, no key) ---
 
 @dataclass
@@ -766,7 +851,7 @@ def classify_exposed_data(breaches, whois_results, reputation_results, findings)
             if dt in seen:
                 continue
             seen.add(dt)
-            entry = {"type": dt, "source": f"Fuite: {b.name}", "date": b.date}
+            entry = {"type": dt, "source": f"Fuite: {b.breach_name}", "date": b.breach_date}
             if dt in critical_types:
                 categories["CRITIQUE"].append(entry)
             elif dt in high_types:
@@ -1176,7 +1261,9 @@ def cell(text):
 
 def render_report(opts, runs, findings, started, breaches, companies, phone_infos, whois_results, dorks, profile_details,
                    reputation_results=None, wayback_results=None, dns_results=None, paste_urls=None, identity_card=None,
-                   username_permutations=None, risk_score=None, correlations=None, family_dorks=None):
+                   username_permutations=None, risk_score=None, correlations=None, family_dorks=None,
+                   data_classification=None, dark_web_urls=None,
+                   reverse_images=None, address_leaks=None, timeline=None):
     by_kind = {"username": [], "email": []}
     for finding in findings:
         by_kind[finding.kind].append(finding)
@@ -1519,6 +1606,58 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
         for d in _fam:
             out.append(f"| {cell(d['label'])} | [Ouvrir]({d['url']}) |")
 
+    # --- Data Classification ---
+    _dc = data_classification or {}
+    has_classified = any(_dc.get(k) for k in ("CRITIQUE", "ELEVE", "MOYEN", "FAIBLE"))
+    if has_classified:
+        out += ["", "## 19. Classification des donnees exposees", "",
+                "Inventaire des types de donnees exposees, classes par niveau de sensibilite :", ""]
+        out.append("| Niveau | Type de donnee | Source | Date |")
+        out.append("|---|---|---|---|")
+        for level in ("CRITIQUE", "ELEVE", "MOYEN", "FAIBLE"):
+            for entry in _dc.get(level, []):
+                out.append(f"| **{level}** | {cell(entry.get('type', ''))} | {cell(entry.get('source', ''))} | {cell(entry.get('date', ''))} |")
+
+    # --- Dark web / leak database links ---
+    _dw = dark_web_urls or []
+    if _dw:
+        out += ["", "## 20. Verification dark web / bases de fuites", "",
+                "Liens a ouvrir manuellement pour verifier l'exposition dans les bases de donnees de fuites et le dark web :", ""]
+        out.append("| Service | Identifiant | Type | Lien |")
+        out.append("|---|---|---|---|")
+        for entry in _dw:
+            out.append(f"| {cell(entry['service'])} | {cell(entry['identifier'])} | {cell(entry['type'])} | [Verifier]({entry['url']}) |")
+
+    # --- Address / location leak detection ---
+    _addr = address_leaks or []
+    if _addr:
+        out += ["", "## 21. Detection d'exposition d'adresse / localisation", "",
+                "Croisement de toutes les sources pour detecter les fuites d'adresse et de localisation :", ""]
+        out.append("| Source | Type | Detail | Severite |")
+        out.append("|---|---|---|---|")
+        for loc in _addr:
+            out.append(f"| {cell(loc['source'])} | {cell(loc['type'])} | {cell(loc['detail'])} | **{loc['severity']}** |")
+
+    # --- Exposure timeline ---
+    _tl = timeline or []
+    if _tl:
+        out += ["", "## 22. Chronologie d'exposition", "",
+                "Evenements d'exposition classes par date :", ""]
+        out.append("| Date | Type | Detail | Severite |")
+        out.append("|---|---|---|---|")
+        for ev in _tl:
+            out.append(f"| {cell(ev['date'])} | {cell(ev['type'])} | {cell(ev['detail'])} | **{ev['severity']}** |")
+
+    # --- Reverse image search ---
+    _ri = reverse_images or []
+    if _ri:
+        out += ["", "## 23. Recherche d'image inversee", "",
+                "Liens pour effectuer une recherche d'image inversee sur les avatars connus :", ""]
+        out.append("| Plateforme | Image | Google Lens | TinEye | Yandex |")
+        out.append("|---|---|---|---|---|")
+        for img in _ri:
+            out.append(f"| {cell(img['platform'])} | [Voir]({img['image_url']}) | [Rechercher]({img['google_lens']}) | [Rechercher]({img['tineye']}) | [Rechercher]({img['yandex']}) |")
+
     # --- Action plan ---
     _rs = risk_score if risk_score is not None else 0
     out += ["", "---", "", "## Plan d'action", ""]
@@ -1629,6 +1768,10 @@ def parse_args(argv=None):
     parser.add_argument("--pdf", action="store_true", default=None,
                         help="Generer un PDF en plus du Markdown (necessite weasyprint)")
     parser.add_argument("--config", help="Chemin vers un fichier config.json alternatif")
+    parser.add_argument("--json-only", action="store_true",
+                        help="Generer uniquement resultats.json (pas de Markdown/PDF/CSV)")
+    parser.add_argument("--quiet", "-q", action="store_true",
+                        help="Mode silencieux : supprime les messages de progression")
     opts = parser.parse_args(argv)
 
     if opts.config:
@@ -1654,6 +1797,11 @@ def parse_args(argv=None):
 def main(argv=None):
     opts = parse_args(argv)
     started = datetime.now()
+    quiet = opts.quiet
+    def log(msg):
+        if not quiet:
+            print(msg)
+
     report_dir = REPORTS_DIR / f"{started.strftime('%Y%m%d_%H%M%S')}_{safe_name(opts.mandat)}"
     raw_dir = report_dir / "brut"
     raw_dir.mkdir(parents=True)
@@ -1669,17 +1817,17 @@ def main(argv=None):
 
     runs = []
     if jobs:
-        print(f"[*] Phase 1 : {len(jobs)} scan(s) de comptes en parallele...")
+        log(f"[*] Phase 1 : {len(jobs)} scan(s) de comptes en parallele...")
         with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
             futures = [pool.submit(func, identifier, raw_dir, opts) for func, identifier in jobs]
             for future in futures:
                 run = future.result()
                 runs.append(run)
                 etat = "OK" if run.ok else "ECHEC"
-                print(f"  [{etat}] {run.tool} {run.identifier} : {len(run.findings)} compte(s) - {run.note}")
+                log(f"  [{etat}] {run.tool} {run.identifier} : {len(run.findings)} compte(s) - {run.note}")
 
     # Phase 2: Deep analysis (parallel)
-    print("[*] Phase 2 : analyse approfondie...")
+    log("[*] Phase 2 : analyse approfondie...")
     breaches = []
     companies = []
     phone_infos = []
@@ -1729,30 +1877,30 @@ def main(argv=None):
         for f in breach_futures:
             result = f.result()
             breaches.extend(result)
-            print(f"  [INFO] Fuites : {len(result)} trouvee(s)")
+            log(f"  [INFO] Fuites : {len(result)} trouvee(s)")
 
         if company_future:
             companies = company_future.result()
-            print(f"  [INFO] Entreprises : {len(companies)} trouvee(s)")
+            log(f"  [INFO] Entreprises : {len(companies)} trouvee(s)")
 
         for f in phone_futures:
             pi = f.result()
             phone_infos.append(pi)
-            print(f"  [INFO] Telephone {pi.number} : {'valide' if pi.valid else 'invalide'}, {pi.carrier or 'operateur inconnu'}")
+            log(f"  [INFO] Telephone {pi.number} : {'valide' if pi.valid else 'invalide'}, {pi.carrier or 'operateur inconnu'}")
 
         for f in whois_futures:
             w = f.result()
             whois_results.append(w)
             if w:
-                print(f"  [INFO] WHOIS {w['domain']} : domaine personnel detecte")
+                log(f"  [INFO] WHOIS {w['domain']} : domaine personnel detecte")
 
         for f in reputation_futures:
             rep = f.result()
             reputation_results.append(rep)
             if rep.get("error"):
-                print(f"  [INFO] Reputation {rep['email']} : indisponible")
+                log(f"  [INFO] Reputation {rep['email']} : indisponible")
             else:
-                print(f"  [INFO] Reputation {rep['email']} : {rep.get('reputation', '?')}, suspect={rep.get('suspicious', '?')}")
+                log(f"  [INFO] Reputation {rep['email']} : {rep.get('reputation', '?')}, suspect={rep.get('suspicious', '?')}")
 
         dns_results = []
         for f in dns_futures:
@@ -1760,7 +1908,7 @@ def main(argv=None):
             if dr:
                 dns_results.append(dr)
                 hints = ", ".join(dr.hosting_hints) if dr.hosting_hints else "aucun indice"
-                print(f"  [INFO] DNS {dr.domain} : MX={len(dr.mx_records)}, {hints}")
+                log(f"  [INFO] DNS {dr.domain} : MX={len(dr.mx_records)}, {hints}")
 
     # Wayback Machine (runs after Phase 2 pool, uses profile URLs found)
     wayback_results = []
@@ -1770,10 +1918,10 @@ def main(argv=None):
             if f.url:
                 wb_urls.add(f.url)
         if wb_urls:
-            print(f"  [INFO] Wayback Machine : verification de {len(wb_urls)} URL(s)...")
+            log(f"  [INFO] Wayback Machine : verification de {len(wb_urls)} URL(s)...")
             wayback_results = run_wayback_check(list(wb_urls)[:20], raw_dir)
             archived = [r for r in wayback_results if r.total_snapshots > 0]
-            print(f"  [INFO] Wayback : {len(archived)}/{len(wayback_results)} URL(s) archivees")
+            log(f"  [INFO] Wayback : {len(archived)}/{len(wayback_results)} URL(s) archivees")
 
     # Paste / leak site URLs
     paste_urls = []
@@ -1781,7 +1929,7 @@ def main(argv=None):
         paste_urls = build_paste_search_urls(opts.email, opts.username, opts.phone)
 
     # Phase 3: Build report
-    print("[*] Phase 3 : generation du rapport...")
+    log("[*] Phase 3 : generation du rapport...")
     findings = merge_findings(runs)
     profile_details = extract_profile_details(runs)
     dorks = build_google_dorks(opts.nom, opts.email, opts.phone, opts.username)
@@ -1803,6 +1951,13 @@ def main(argv=None):
 
     correlations = build_correlations(findings, profile_details, breaches, whois_results,
                                        reputation_results=reputation_results)
+
+
+    data_classification = classify_exposed_data(breaches, whois_results, reputation_results, findings)
+    dark_web_urls = build_dark_web_check_urls(opts.email, opts.username, opts.phone)
+    reverse_images = build_reverse_image_search_urls(opts.username, opts.email)
+    address_leaks = detect_address_leaks(breaches, whois_results, profile_details, companies)
+    timeline = build_exposure_timeline(breaches, wayback_results, findings, companies)
 
     (report_dir / "resultats.json").write_text(
         json.dumps(
@@ -1832,58 +1987,72 @@ def main(argv=None):
                 "risk_level": risk_level,
                 "correlations": correlations,
                 "family_dorks": family_dorks,
+                "data_classification": data_classification,
+                "dark_web_urls": dark_web_urls,
+                "reverse_images": reverse_images,
+                "address_leaks": address_leaks,
+                "timeline": timeline,
             },
             indent=2, ensure_ascii=False,
         ),
         encoding="utf-8",
     )
 
-    report_file = report_dir / "RAPPORT.md"
-    report_file.write_text(
-        render_report(opts, runs, findings, started, breaches, companies, phone_infos, whois_results, dorks, profile_details,
-                      reputation_results=reputation_results, wayback_results=wayback_results,
-                      dns_results=dns_results, paste_urls=paste_urls, identity_card=identity_card,
-                      username_permutations=username_permutations, risk_score=risk_score,
-                      correlations=correlations, family_dorks=family_dorks),
-        encoding="utf-8",
-    )
-
-    print(f"[*] Resultat : {len(findings)} comptes, {len(breaches)} fuites, {len(companies)} entreprises, "
+    log(f"[*] Resultat : {len(findings)} comptes, {len(breaches)} fuites, {len(companies)} entreprises, "
           f"score={risk_score}/100 ({risk_level}), {len(correlations)} correlation(s)")
-    print(f"[*] Rapport : {report_file}")
 
-    # CSV exports
-    try:
-        from scripts.csv_export import export_accounts_csv, export_breaches_csv, export_summary_csv
-    except ImportError:
-        try:
-            csv_dir = Path(__file__).resolve().parent
-            sys.path.insert(0, str(csv_dir))
-            from csv_export import export_accounts_csv, export_breaches_csv, export_summary_csv
-        except ImportError:
-            export_accounts_csv = export_breaches_csv = export_summary_csv = None
-    if export_accounts_csv:
-        export_accounts_csv(report_dir, findings)
-        if breaches:
-            export_breaches_csv(report_dir, breaches)
-        export_summary_csv(report_dir, opts, findings, breaches, companies, phone_infos)
-        print(f"[*] CSV : comptes.csv, resume.csv" + (", fuites.csv" if breaches else ""))
+    if not opts.json_only:
+        report_file = report_dir / "RAPPORT.md"
+        report_file.write_text(
+            render_report(opts, runs, findings, started, breaches, companies, phone_infos, whois_results, dorks, profile_details,
+                          reputation_results=reputation_results, wayback_results=wayback_results,
+                          dns_results=dns_results, paste_urls=paste_urls, identity_card=identity_card,
+                          username_permutations=username_permutations, risk_score=risk_score,
+                          correlations=correlations, family_dorks=family_dorks, data_classification=data_classification,
+                          dark_web_urls=dark_web_urls, reverse_images=reverse_images,
+                          address_leaks=address_leaks, timeline=timeline),
+            encoding="utf-8",
+        )
+        log(f"[*] Rapport : {report_file}")
 
-    if opts.pdf:
+        # CSV exports
         try:
-            from scripts.pdf_export import convert as pdf_convert
+            from scripts.csv_export import export_accounts_csv, export_breaches_csv, export_summary_csv
         except ImportError:
             try:
-                pdf_dir = Path(__file__).resolve().parent
-                sys.path.insert(0, str(pdf_dir))
-                from pdf_export import convert as pdf_convert
+                csv_dir = Path(__file__).resolve().parent
+                sys.path.insert(0, str(csv_dir))
+                from csv_export import export_accounts_csv, export_breaches_csv, export_summary_csv
             except ImportError:
-                pdf_convert = None
-        if pdf_convert:
-            pdf_path = pdf_convert(report_file)
-            print(f"[*] PDF : {pdf_path}")
-        else:
-            print("[!] weasyprint non installe, PDF non genere (pip install weasyprint)")
+                export_accounts_csv = export_breaches_csv = export_summary_csv = None
+        if export_accounts_csv:
+            export_accounts_csv(report_dir, findings)
+            if breaches:
+                export_breaches_csv(report_dir, breaches)
+            export_summary_csv(report_dir, opts, findings, breaches, companies, phone_infos)
+            log(f"[*] CSV : comptes.csv, resume.csv" + (", fuites.csv" if breaches else ""))
+
+        if opts.pdf:
+            try:
+                from scripts.pdf_export import convert as pdf_convert
+            except ImportError:
+                try:
+                    pdf_dir = Path(__file__).resolve().parent
+                    sys.path.insert(0, str(pdf_dir))
+                    from pdf_export import convert as pdf_convert
+                except ImportError:
+                    pdf_convert = None
+            if pdf_convert:
+                pdf_path = pdf_convert(report_file)
+                log(f"[*] PDF : {pdf_path}")
+            else:
+                log("[!] weasyprint non installe, PDF non genere (pip install weasyprint)")
+    else:
+        log(f"[*] JSON uniquement : {report_dir / 'resultats.json'}")
+
+    elapsed = datetime.now() - started
+    minutes, seconds = divmod(int(elapsed.total_seconds()), 60)
+    log(f"[*] Termine en {minutes}m{seconds:02d}s")
 
     if runs and not any(run.ok for run in runs):
         sys.exit(1)
