@@ -100,6 +100,14 @@ def safe_name(value):
     return re.sub(r"[^A-Za-z0-9_\-]", "_", value)
 
 
+def _c(text, color=""):
+    colors = {"green": "\033[92m", "red": "\033[91m", "yellow": "\033[93m",
+              "blue": "\033[94m", "bold": "\033[1m", "dim": "\033[2m"}
+    if not sys.stdout.isatty() or not color:
+        return str(text)
+    return f"{colors.get(color, '')}{text}\033[0m"
+
+
 def execute(cmd, log_file, cwd, timeout):
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd)
@@ -511,6 +519,45 @@ def build_paste_search_urls(emails=None, usernames=None, phones=None):
     return urls
 
 
+# --- NEW: Social media profile direct links ---
+
+def build_social_profile_urls(usernames=None, emails=None, phones=None):
+    """Generate direct profile URLs for major social networks and professional platforms."""
+    urls = []
+    for u in (usernames or []):
+        q = urllib.parse.quote(u)
+        urls.extend([
+            {"platform": "LinkedIn", "url": f"https://www.linkedin.com/in/{q}", "type": "professionnel"},
+            {"platform": "GitHub", "url": f"https://github.com/{q}", "type": "developpeur"},
+            {"platform": "Twitter/X", "url": f"https://x.com/{q}", "type": "social"},
+            {"platform": "Instagram", "url": f"https://www.instagram.com/{q}", "type": "social"},
+            {"platform": "Facebook", "url": f"https://www.facebook.com/{q}", "type": "social"},
+            {"platform": "TikTok", "url": f"https://www.tiktok.com/@{q}", "type": "social"},
+            {"platform": "Reddit", "url": f"https://www.reddit.com/user/{q}", "type": "forum"},
+            {"platform": "Pinterest", "url": f"https://www.pinterest.com/{q}", "type": "social"},
+            {"platform": "YouTube", "url": f"https://www.youtube.com/@{q}", "type": "video"},
+            {"platform": "Twitch", "url": f"https://www.twitch.tv/{q}", "type": "streaming"},
+            {"platform": "Medium", "url": f"https://medium.com/@{q}", "type": "blog"},
+            {"platform": "Viadeo", "url": f"https://www.viadeo.com/p/{q}", "type": "professionnel"},
+            {"platform": "GitLab", "url": f"https://gitlab.com/{q}", "type": "developpeur"},
+            {"platform": "Bitbucket", "url": f"https://bitbucket.org/{q}", "type": "developpeur"},
+            {"platform": "Stack Overflow", "url": f"https://stackoverflow.com/users/?tab=accounts&SearchText={q}", "type": "developpeur"},
+            {"platform": "Keybase", "url": f"https://keybase.io/{q}", "type": "securite"},
+            {"platform": "Gravatar", "url": f"https://gravatar.com/{q}", "type": "avatar"},
+            {"platform": "Flickr", "url": f"https://www.flickr.com/people/{q}", "type": "photo"},
+            {"platform": "Snapchat", "url": f"https://www.snapchat.com/add/{q}", "type": "social"},
+            {"platform": "Telegram", "url": f"https://t.me/{q}", "type": "messagerie"},
+        ])
+    for email in (emails or []):
+        local = email.split("@")[0]
+        q = urllib.parse.quote(local)
+        urls.extend([
+            {"platform": "Gravatar (email)", "url": f"https://gravatar.com/{q}", "type": "avatar"},
+            {"platform": "About.me", "url": f"https://about.me/{q}", "type": "personnel"},
+        ])
+    return urls
+
+
 # --- NEW: Wayback Machine check (CDX API, free, no key) ---
 
 @dataclass
@@ -643,6 +690,112 @@ def run_dns_lookup(domain, raw_dir):
         json.dumps(asdict(result), indent=2, ensure_ascii=False), encoding="utf-8"
     )
     return result
+
+
+# --- Username permutation generator ---
+
+def generate_username_permutations(nom=None, emails=None, usernames=None):
+    """Generate likely username variations from a person's name and known identifiers."""
+    perms = set()
+    if nom:
+        parts = nom.lower().split()
+        if len(parts) >= 2:
+            first, last = parts[0], parts[-1]
+            perms.update([
+                first + last, last + first,
+                first + "." + last, last + "." + first,
+                first + "_" + last, last + "_" + first,
+                first[0] + last, first[0] + "." + last, first[0] + "_" + last,
+                last + first[0], last + "." + first[0], last + "_" + first[0],
+                first + last[0], first + "." + last[0],
+                first, last,
+            ])
+            for suffix in ["", "1", "123", "01", "75", "92", "33"]:
+                if suffix:
+                    perms.add(first + last + suffix)
+                    perms.add(first + "." + last + suffix)
+                    perms.add(last + first + suffix)
+
+    for email in (emails or []):
+        local = email.split("@")[0].lower()
+        perms.add(local)
+        perms.add(local.replace(".", "_"))
+        perms.add(local.replace(".", ""))
+
+    existing = {u.lower() for u in (usernames or [])}
+    return sorted(perms - existing)
+
+
+# --- Risk scoring (weighted) ---
+
+def compute_risk_score(findings, breaches, companies, phone_infos, whois_results,
+                       reputation_results=None, dns_results=None):
+    """Compute a weighted risk score (0-100) and level (FAIBLE/MOYEN/ELEVE/CRITIQUE)."""
+    score = 0
+
+    nb_accounts = len(findings)
+    if nb_accounts > 20:
+        score += 25
+    elif nb_accounts > 10:
+        score += 15
+    elif nb_accounts > 5:
+        score += 10
+    elif nb_accounts > 0:
+        score += 5
+
+    nb_breaches = len(breaches)
+    if nb_breaches > 5:
+        score += 30
+    elif nb_breaches > 2:
+        score += 20
+    elif nb_breaches > 0:
+        score += 10
+
+    sensitive_types = {"Passwords", "Credit cards", "Phone numbers", "Physical addresses",
+                       "IP addresses", "Bank account numbers", "Social security numbers",
+                       "Passport numbers", "Government issued IDs"}
+    for b in breaches:
+        if sensitive_types & set(b.data_types):
+            score += 5
+
+    if companies:
+        for c in companies:
+            if c.address and any(w in c.address.lower() for w in ["domicile", "personnel", "maison"]):
+                score += 10
+            else:
+                score += 3
+
+    whois_exposed = [w for w in (whois_results or []) if w and w.get("registrant_name")]
+    score += len(whois_exposed) * 8
+
+    rep_valid = [r for r in (reputation_results or []) if not r.get("error")]
+    for r in rep_valid:
+        if r.get("suspicious"):
+            score += 10
+        if r.get("credentials_leaked"):
+            score += 8
+        if r.get("blacklisted"):
+            score += 5
+
+    dns_list = dns_results or []
+    for d in dns_list:
+        if hasattr(d, "spf") and not d.spf:
+            score += 3
+        if hasattr(d, "dmarc") and not d.dmarc:
+            score += 3
+
+    score = min(score, 100)
+
+    if score >= 70:
+        level = "CRITIQUE"
+    elif score >= 40:
+        level = "ELEVE"
+    elif score >= 15:
+        level = "MOYEN"
+    else:
+        level = "FAIBLE"
+
+    return score, level
 
 
 # --- NEW: Google dorking (extract dork URLs for the report) ---
@@ -801,7 +954,8 @@ def cell(text):
 
 
 def render_report(opts, runs, findings, started, breaches, companies, phone_infos, whois_results, dorks, profile_details,
-                   reputation_results=None, wayback_results=None, dns_results=None, paste_urls=None, identity_card=None):
+                   reputation_results=None, wayback_results=None, dns_results=None, paste_urls=None, identity_card=None,
+                   username_permutations=None, risk_score=None):
     by_kind = {"username": [], "email": []}
     for finding in findings:
         by_kind[finding.kind].append(finding)
@@ -828,11 +982,9 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
     total_accounts = len(findings)
     total_breaches = len(breaches)
     total_companies = len(companies)
-    rep_leaked = any(r.get("credentials_leaked") or r.get("data_breach") for r in (reputation_results or []) if not r.get("error"))
-    rep_suspicious = any(r.get("suspicious") or r.get("blacklisted") for r in (reputation_results or []) if not r.get("error"))
-    risk_level = "ELEVE" if total_breaches > 3 or total_accounts > 20 or rep_leaked else \
-                 "MOYEN" if total_breaches > 0 or total_accounts > 5 or rep_suspicious or total_companies > 0 else "FAIBLE"
-    out.append(f"**Niveau d'exposition global : {risk_level}**")
+    risk_score, risk_level = compute_risk_score(findings, breaches, companies, phone_infos, whois_results,
+                                                reputation_results=reputation_results, dns_results=dns_results)
+    out.append(f"**Niveau d'exposition global : {risk_level} ({risk_score}/100)**")
     out.append("")
     out.append(f"| Indicateur | Nombre |")
     out.append(f"|---|---|")
@@ -1026,10 +1178,22 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
         for d in dorks:
             out.append(f"| {cell(d['label'])} | [Ouvrir]({d['url']}) |")
 
+    # --- Username permutations ---
+    _perms = username_permutations or []
+    if _perms:
+        out += ["", "## 13. Pistes de pseudos supplementaires (permutations)", "",
+                "Pseudos generes automatiquement a partir du nom et des identifiants connus. "
+                "A verifier manuellement ou lors d'un approfondissement :", ""]
+        for i in range(0, len(_perms), 5):
+            chunk = _perms[i:i+5]
+            out.append(f"  `{'`  `'.join(chunk)}`")
+        out.append("")
+        out.append(f"*{len(_perms)} permutations generees. Lancer Sherlock/Maigret sur les plus probables pour elargir la recherche.*")
+
     # --- Paste / leak search URLs ---
     _paste_urls = paste_urls or []
     if _paste_urls:
-        out += ["", "## 13. Recherche dans les pastes et bases de fuites", "",
+        out += ["", "## 14. Recherche dans les pastes et bases de fuites", "",
                 "Liens a ouvrir manuellement pour chercher des traces dans les pastes et bases de fuites :", ""]
         out.append("| Recherche | Lien |")
         out.append("|---|---|")
@@ -1039,7 +1203,7 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
     # --- DNS enumeration ---
     _dns = dns_results or []
     if _dns:
-        out += ["", "## 14. Analyse DNS des domaines email personnels", ""]
+        out += ["", "## 15. Analyse DNS des domaines email personnels", ""]
         for dr in _dns:
             out.append(f"### {dr.domain}")
             out.append("")
@@ -1064,7 +1228,7 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
     _wb = wayback_results or []
     archived = [r for r in _wb if r.total_snapshots > 0]
     if archived:
-        out += ["", "## 15. Historique web (Wayback Machine)", ""]
+        out += ["", "## 16. Historique web (Wayback Machine)", ""]
         out.append("Profils ayant des archives dans la Wayback Machine (web.archive.org) :")
         out.append("")
         out.append("| URL | Plus ancien | Plus recent | Nb snapshots |")
@@ -1074,6 +1238,26 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
         out.append("")
         out.append("**Risque :** meme un profil supprime peut avoir ete archive. "
                     "Consulter https://web.archive.org pour voir les versions passees.")
+
+    # --- Social profile direct links ---
+    if "social" not in opts.skip:
+        social_urls = build_social_profile_urls(opts.username, opts.email)
+        if social_urls:
+            out += ["", "## 17. Liens directs vers les profils (verification manuelle)", ""]
+            out.append("Liens a ouvrir manuellement pour verifier l'existence de profils sur les plateformes majeures :")
+            out.append("")
+            types_order = ["professionnel", "social", "developpeur", "forum", "video", "streaming",
+                           "blog", "photo", "messagerie", "securite", "avatar", "personnel"]
+            for ptype in types_order:
+                group = [u for u in social_urls if u["type"] == ptype]
+                if group:
+                    out.append(f"### {ptype.capitalize()}")
+                    out.append("")
+                    out.append("| Plateforme | Lien |")
+                    out.append("|---|---|")
+                    for u in group:
+                        out.append(f"| {cell(u['platform'])} | [Verifier]({u['url']}) |")
+                    out.append("")
 
     # --- Action plan ---
     out += ["", "---", "", "## Plan d'action", ""]
@@ -1150,7 +1334,7 @@ def parse_args(argv=None):
     parser.add_argument("--top-sites", type=int, default=500, help="Maigret : nombre de sites (defaut 500)")
     parser.add_argument("--skip", action="append", default=[],
                         choices=["holehe", "sherlock", "maigret", "breach", "company", "whois", "phone",
-                                 "reputation", "wayback", "dns", "paste"],
+                                 "reputation", "wayback", "dns", "paste", "social"],
                         help="Module a ne pas lancer (repetable)")
     parser.add_argument("--timeout", type=int, default=10, help="Timeout par requete (defaut 10)")
     parser.add_argument("--tool-timeout", type=int, default=1800, help="Duree max par outil (defaut 1800)")
@@ -1317,6 +1501,12 @@ def main(argv=None):
     identity_card = build_identity_card(opts, profile_details, phone_infos, companies, whois_results,
                                          reputation_results=reputation_results, breaches=breaches, findings=findings)
 
+    username_permutations = generate_username_permutations(
+        nom=opts.nom, emails=opts.email, usernames=opts.username)
+
+    risk_score, risk_level = compute_risk_score(findings, breaches, companies, phone_infos, whois_results,
+                                                 reputation_results=reputation_results, dns_results=dns_results)
+
     (report_dir / "resultats.json").write_text(
         json.dumps(
             {
@@ -1340,6 +1530,9 @@ def main(argv=None):
                 "dorks": dorks,
                 "paste_urls": paste_urls,
                 "identity_card": identity_card,
+                "username_permutations": username_permutations,
+                "risk_score": risk_score,
+                "risk_level": risk_level,
             },
             indent=2, ensure_ascii=False,
         ),
@@ -1350,12 +1543,30 @@ def main(argv=None):
     report_file.write_text(
         render_report(opts, runs, findings, started, breaches, companies, phone_infos, whois_results, dorks, profile_details,
                       reputation_results=reputation_results, wayback_results=wayback_results,
-                      dns_results=dns_results, paste_urls=paste_urls, identity_card=identity_card),
+                      dns_results=dns_results, paste_urls=paste_urls, identity_card=identity_card,
+                      username_permutations=username_permutations, risk_score=risk_score),
         encoding="utf-8",
     )
 
     print(f"[*] Resultat : {len(findings)} comptes, {len(breaches)} fuites, {len(companies)} entreprises")
     print(f"[*] Rapport : {report_file}")
+
+    # CSV exports
+    try:
+        from scripts.csv_export import export_accounts_csv, export_breaches_csv, export_summary_csv
+    except ImportError:
+        try:
+            csv_dir = Path(__file__).resolve().parent
+            sys.path.insert(0, str(csv_dir))
+            from csv_export import export_accounts_csv, export_breaches_csv, export_summary_csv
+        except ImportError:
+            export_accounts_csv = export_breaches_csv = export_summary_csv = None
+    if export_accounts_csv:
+        export_accounts_csv(report_dir, findings)
+        if breaches:
+            export_breaches_csv(report_dir, breaches)
+        export_summary_csv(report_dir, opts, findings, breaches, companies, phone_infos)
+        print(f"[*] CSV : comptes.csv, resume.csv" + (", fuites.csv" if breaches else ""))
 
     if opts.pdf:
         try:

@@ -51,13 +51,13 @@ venv\Scripts\pip install -r requirements.txt
 
 Chaque audit cree `reports/<date>_<mandat>/` (jamais versionne) :
 
-- `RAPPORT.md` : livrable client complet avec 15 sections
+- `RAPPORT.md` : livrable client complet avec 17 sections
 - `resultats.json` : memes donnees, exploitables par un autre outil
 - `brut/` : journaux et exports de chaque outil
 
 ### Sections du rapport
 
-1. **Synthese executive** : niveau d'exposition global (FAIBLE/MOYEN/ELEVE), compteurs, fiche d'identite numerique consolidee
+1. **Synthese executive** : score de risque pondere (0-100) et niveau (FAIBLE/MOYEN/ELEVE/CRITIQUE), compteurs, fiche d'identite numerique consolidee
 2. **Profil synthetique** : nom, bio, localisation, profession extraits des profils trouves
 3. **Analyse telephone** : validation, operateur, type de ligne, pays
 4. **Fuites de donnees** : breaches connues via HIBP / h8mail avec types de donnees exposees
@@ -69,9 +69,11 @@ Chaque audit cree `reports/<date>_<mandat>/` (jamais versionne) :
 10. **Comptes (email)** : services ou l'email est inscrit
 11. **Identifiants supplementaires** : autres pseudos reperes sur les profils
 12. **Google dorks** : liens cliquables pour approfondir manuellement (LinkedIn, Facebook, societe.com, Pages Blanches, documents PDF/XLS)
-13. **Pastes et fuites** : liens vers Pastebin, GitHub Gists, IntelligenceX, Dehashed
-14. **DNS** : enregistrements MX, SPF, DMARC des domaines email personnels, hebergeur detecte
-15. **Wayback Machine** : historique d'archivage des profils trouves (plus ancien/recent snapshot)
+13. **Permutations de pseudos** : variantes generees automatiquement a partir du nom et des identifiants connus (jean.dupont → jdupont, dupontj, etc.)
+14. **Pastes et fuites** : liens vers Pastebin, GitHub Gists, IntelligenceX, Dehashed
+15. **DNS** : enregistrements MX, SPF, DMARC des domaines email personnels, hebergeur detecte
+16. **Wayback Machine** : historique d'archivage des profils trouves (plus ancien/recent snapshot)
+17. **Liens directs** : liens de verification manuelle vers les plateformes majeures
 
 ## Modules d'investigation
 

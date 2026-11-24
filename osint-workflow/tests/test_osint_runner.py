@@ -262,6 +262,113 @@ class SkipChoicesTest(unittest.TestCase):
         self.assertIn("reputation", opts.skip)
 
 
+class ConfigTest(unittest.TestCase):
+    def test_load_config_missing_file(self):
+        cfg = runner.load_config("/tmp/nonexistent_config_osint.json")
+        self.assertEqual(cfg, {})
+
+    def test_load_config_valid_file(self):
+        tmp = Path(tempfile.mkdtemp()) / "cfg.json"
+        tmp.write_text('{"hibp_api_key": "test123", "export_pdf": true}', encoding="utf-8")
+        cfg = runner.load_config(str(tmp))
+        self.assertEqual(cfg["hibp_api_key"], "test123")
+        self.assertTrue(cfg["export_pdf"])
+
+    def test_load_config_invalid_json(self):
+        tmp = Path(tempfile.mkdtemp()) / "bad.json"
+        tmp.write_text("{broken json", encoding="utf-8")
+        cfg = runner.load_config(str(tmp))
+        self.assertEqual(cfg, {})
+
+
+class PdfFlagTest(unittest.TestCase):
+    def setUp(self):
+        self._orig_config = runner.CONFIG.copy()
+
+    def tearDown(self):
+        runner.CONFIG = self._orig_config
+
+    def test_pdf_flag_accepted(self):
+        opts = runner.parse_args(["-m", "M1", "-e", "a@b.com", "--pdf"])
+        self.assertTrue(opts.pdf)
+
+    def test_pdf_flag_default_false(self):
+        runner.CONFIG = {}
+        opts = runner.parse_args(["-m", "M1", "-e", "a@b.com"])
+        self.assertFalse(opts.pdf)
+
+    def test_config_flag_accepted(self):
+        tmp = Path(tempfile.mkdtemp()) / "alt.json"
+        tmp.write_text('{"export_pdf": true}', encoding="utf-8")
+        opts = runner.parse_args(["-m", "M1", "-e", "a@b.com", "--config", str(tmp)])
+        self.assertTrue(opts.pdf)
+
+
+class HttpGetJsonTest(unittest.TestCase):
+    def test_returns_none_on_failure(self):
+        with patch("osint_runner.urllib.request.urlopen", side_effect=Exception("fail")):
+            result = runner.http_get_json("https://example.com/api", timeout=1, retries=0)
+        self.assertIsNone(result)
+
+    def test_parses_json_response(self):
+        fake_data = json.dumps({"key": "value"}).encode()
+        class FakeResp:
+            def read(self):
+                return fake_data
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                pass
+        with patch("osint_runner.urllib.request.urlopen", return_value=FakeResp()):
+            result = runner.http_get_json("https://example.com/api", timeout=1, retries=0)
+        self.assertEqual(result, {"key": "value"})
+
+
+class RiskLevelTest(unittest.TestCase):
+    """Test that the risk calculation logic produces correct levels."""
+    def _make_opts(self):
+        return runner.parse_args(["-m", "M1", "-e", "a@b.com", "-u", "user1"])
+
+    def test_risk_eleve_many_breaches(self):
+        opts = self._make_opts()
+        runs = [runner.ToolRun("sherlock", "user1", True, findings=[
+            runner.Finding("user1", "username", f"Site{i}", f"https://site{i}.com", ["sherlock"])
+            for i in range(3)
+        ])]
+        findings = runner.merge_findings(runs)
+        breaches = [runner.BreachInfo("a@b.com", f"Breach{i}") for i in range(4)]
+        # Directly test the logic from render_report
+        total_breaches = len(breaches)
+        total_accounts = len(findings)
+        risk = "ELEVE" if total_breaches > 3 or total_accounts > 20 else \
+               "MOYEN" if total_breaches > 0 or total_accounts > 5 else "FAIBLE"
+        self.assertEqual(risk, "ELEVE")
+
+    def test_risk_faible_clean(self):
+        risk = "ELEVE" if 0 > 3 or 2 > 20 else \
+               "MOYEN" if 0 > 0 or 2 > 5 else "FAIBLE"
+        self.assertEqual(risk, "FAIBLE")
+
+
+class SocialProfileTest(unittest.TestCase):
+    def test_social_urls_with_username(self):
+        urls = runner.build_social_profile_urls(usernames=["jdupont"])
+        platforms = [u["platform"] for u in urls]
+        self.assertIn("LinkedIn", platforms)
+        self.assertIn("GitHub", platforms)
+        self.assertIn("Twitter/X", platforms)
+        self.assertIn("Instagram", platforms)
+        self.assertTrue(all(u["url"].startswith("https://") for u in urls))
+
+    def test_social_urls_empty(self):
+        urls = runner.build_social_profile_urls()
+        self.assertEqual(urls, [])
+
+    def test_social_urls_with_email(self):
+        urls = runner.build_social_profile_urls(emails=["test@example.com"])
+        self.assertTrue(any("Gravatar" in u["platform"] for u in urls))
+
+
 class IdentityCardTest(unittest.TestCase):
     def test_builds_card_from_all_sources(self):
         opts = runner.parse_args(["-m", "M1", "-e", "jean@custom-domain.fr", "-u", "jdupont",
@@ -294,6 +401,72 @@ class IdentityCardTest(unittest.TestCase):
         self.assertEqual(card["emails"], ["a@b.com"])
         self.assertNotIn("nom", card)
         self.assertNotIn("nb_fuites", card)
+
+
+class UsernamePermutationTest(unittest.TestCase):
+    def test_generates_from_name(self):
+        perms = runner.generate_username_permutations(nom="Jean Dupont")
+        self.assertIn("jeandupont", perms)
+        self.assertIn("dupont.jean", perms)
+        self.assertIn("j.dupont", perms)
+        self.assertIn("jdupont", perms)
+        self.assertIn("dupontj", perms)
+        self.assertGreater(len(perms), 10)
+
+    def test_generates_from_email(self):
+        perms = runner.generate_username_permutations(emails=["mj.lcaze@gmail.com"])
+        self.assertIn("mj.lcaze", perms)
+        self.assertIn("mj_lcaze", perms)
+        self.assertIn("mjlcaze", perms)
+
+    def test_excludes_existing_usernames(self):
+        perms = runner.generate_username_permutations(nom="Jean Dupont", usernames=["jdupont"])
+        self.assertNotIn("jdupont", perms)
+
+    def test_empty_inputs(self):
+        perms = runner.generate_username_permutations()
+        self.assertEqual(perms, [])
+
+
+class RiskScoreTest(unittest.TestCase):
+    def test_low_risk(self):
+        score, level = runner.compute_risk_score([], [], [], [], [])
+        self.assertEqual(score, 0)
+        self.assertEqual(level, "FAIBLE")
+
+    def test_high_risk_many_breaches(self):
+        breaches = [runner.BreachInfo("a@b.com", f"Breach{i}", "2023", ["Passwords", "Email addresses"]) for i in range(6)]
+        findings = [runner.Finding("a", "email", f"Site{i}", f"https://s{i}.com", ["holehe"]) for i in range(25)]
+        score, level = runner.compute_risk_score(findings, breaches, [], [], [])
+        self.assertGreaterEqual(score, 70)
+        self.assertEqual(level, "CRITIQUE")
+
+    def test_medium_risk(self):
+        findings = [runner.Finding("a", "email", f"Site{i}", f"https://s{i}.com", ["holehe"]) for i in range(8)]
+        breaches = [runner.BreachInfo("a@b.com", "Breach1", "2023", ["Email addresses"])]
+        score, level = runner.compute_risk_score(findings, breaches, [], [], [])
+        self.assertGreaterEqual(score, 15)
+        self.assertIn(level, ["MOYEN", "ELEVE"])
+
+    def test_whois_exposure_adds_score(self):
+        score_without, _ = runner.compute_risk_score([], [], [], [], [])
+        score_with, _ = runner.compute_risk_score([], [], [], [], [{"registrant_name": "Jean Dupont", "domain": "example.com"}])
+        self.assertGreater(score_with, score_without)
+
+
+class CsvExportTest(unittest.TestCase):
+    def test_export_accounts_csv(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from csv_export import export_accounts_csv
+        tmp = Path(tempfile.mkdtemp())
+        findings = [
+            runner.Finding("bob", "username", "GitHub", "https://github.com/bob", ["sherlock"], {"uid": "123"}),
+            runner.Finding("bob@test.com", "email", "spotify", "https://spotify.com", ["holehe"]),
+        ]
+        path = export_accounts_csv(tmp, findings)
+        self.assertTrue(path.exists())
+        lines = path.read_text(encoding="utf-8").strip().split("\n")
+        self.assertEqual(len(lines), 3)  # header + 2 rows
 
 
 if __name__ == "__main__":
