@@ -8,8 +8,9 @@ from pathlib import Path
 
 try:
     from weasyprint import HTML
+    HAS_WEASYPRINT = True
 except ImportError:
-    sys.exit("weasyprint non installe : pip install weasyprint")
+    HAS_WEASYPRINT = False
 
 
 CSS = """
@@ -235,9 +236,13 @@ def convert(md_path, pdf_path=None):
     html_intermediate = str(md_path).replace(".md", ".html")
     Path(html_intermediate).write_text(html_text, encoding="utf-8")
 
-    HTML(string=html_text).write_pdf(pdf_path)
-    print(f"[*] PDF genere : {pdf_path}")
-    return pdf_path
+    if HAS_WEASYPRINT:
+        HTML(string=html_text).write_pdf(pdf_path)
+        print(f"[*] PDF genere : {pdf_path}")
+        return pdf_path
+    else:
+        print(f"[!] weasyprint non installe, HTML genere a la place : {html_intermediate}")
+        return html_intermediate
 
 
 if __name__ == "__main__":

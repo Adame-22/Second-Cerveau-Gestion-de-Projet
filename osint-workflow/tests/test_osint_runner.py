@@ -484,6 +484,57 @@ class CorrelationTest(unittest.TestCase):
         self.assertEqual(corr, [])
 
 
+class FamilyDorksTest(unittest.TestCase):
+    def test_family_dorks_with_name(self):
+        dorks = runner.build_family_search_dorks(nom="Jean Dupont")
+        labels = [d["label"] for d in dorks]
+        self.assertTrue(any("Geneanet" in l for l in labels))
+        self.assertTrue(any("Filae" in l for l in labels))
+        self.assertTrue(any("Famille" in l for l in labels))
+        self.assertTrue(any("necrologie" in l.lower() for l in labels))
+        self.assertTrue(any("Etat civil" in l for l in labels))
+        for d in dorks:
+            self.assertTrue(d["url"].startswith("https://"))
+
+    def test_family_dorks_with_prenom(self):
+        dorks = runner.build_family_search_dorks(nom="Dupont", prenom="Jean")
+        labels = [d["label"] for d in dorks]
+        self.assertTrue(any("Prenom" in l for l in labels))
+
+    def test_family_dorks_with_dob(self):
+        dorks = runner.build_family_search_dorks(nom="Dupont", dob="15/06/1990")
+        labels = [d["label"] for d in dorks]
+        self.assertTrue(any("1990" in l for l in labels))
+        self.assertTrue(any("Age" in l for l in labels))
+
+    def test_family_dorks_empty(self):
+        dorks = runner.build_family_search_dorks()
+        self.assertEqual(dorks, [])
+
+    def test_family_dorks_with_phones(self):
+        dorks = runner.build_family_search_dorks(nom="Dupont", phones=["+33612345678"])
+        labels = [d["label"] for d in dorks]
+        self.assertTrue(any("annuaire" in l.lower() for l in labels))
+
+
+class NewCliArgsTest(unittest.TestCase):
+    def test_prenom_flag(self):
+        opts = runner.parse_args(["-m", "M1", "-e", "a@b.com", "--prenom", "Jean"])
+        self.assertEqual(opts.prenom, "Jean")
+
+    def test_dob_flag(self):
+        opts = runner.parse_args(["-m", "M1", "-e", "a@b.com", "--dob", "15/06/1990"])
+        self.assertEqual(opts.dob, "15/06/1990")
+
+    def test_skip_family(self):
+        opts = runner.parse_args(["-m", "M1", "-e", "a@b.com", "--skip", "family"])
+        self.assertIn("family", opts.skip)
+
+    def test_skip_social(self):
+        opts = runner.parse_args(["-m", "M1", "-e", "a@b.com", "--skip", "social"])
+        self.assertIn("social", opts.skip)
+
+
 class CsvExportTest(unittest.TestCase):
     def test_export_accounts_csv(self):
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))

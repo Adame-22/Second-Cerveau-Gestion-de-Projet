@@ -392,11 +392,26 @@ def run_company_search(name, raw_dir):
                 source="pappers.fr (nom complet)",
             ))
 
-    # Deduplicate by SIREN
+    # OpenCorporates search (international, free, no API key)
+    oc_url = f"https://api.opencorporates.com/v0.4/companies/search?q={q}&per_page=5"
+    oc_data = http_get_json(oc_url, timeout=15)
+    if oc_data and isinstance(oc_data, dict):
+        for item in (oc_data.get("results", {}).get("companies", []) or []):
+            co = item.get("company", {})
+            companies.append(CompanyInfo(
+                name=co.get("name", ""),
+                siren=co.get("company_number", ""),
+                status=co.get("current_status", ""),
+                address=co.get("registered_address_in_full", ""),
+                creation_date=co.get("incorporation_date", ""),
+                source=f"opencorporates.com ({co.get('jurisdiction_code', '')})",
+            ))
+
+    # Deduplicate by SIREN/company number
     seen = set()
     unique = []
     for c in companies:
-        key = c.siren or c.name
+        key = (c.siren or c.name).lower()
         if key not in seen:
             seen.add(key)
             unique.append(c)
@@ -728,6 +743,60 @@ def generate_username_permutations(nom=None, emails=None, usernames=None):
 
 # --- Risk scoring (weighted) ---
 
+
+def classify_exposed_data(breaches, whois_results, reputation_results, findings):
+    """Classify all exposed data by sensitivity level for the report."""
+    categories = {
+        "CRITIQUE": [],
+        "ELEVE": [],
+        "MOYEN": [],
+        "FAIBLE": [],
+    }
+    critical_types = {"Passwords", "Credit cards", "Bank account numbers",
+                      "Social security numbers", "Passport numbers", "Government issued IDs",
+                      "Security questions and answers", "Auth tokens"}
+    high_types = {"Phone numbers", "Physical addresses", "IP addresses",
+                  "Dates of birth", "Geographic locations", "Biometric data"}
+    medium_types = {"Email addresses", "Names", "Employers", "Job titles",
+                    "Genders", "Ages", "Education levels", "Income levels"}
+
+    seen = set()
+    for b in (breaches or []):
+        for dt in b.data_types:
+            if dt in seen:
+                continue
+            seen.add(dt)
+            entry = {"type": dt, "source": f"Fuite: {b.name}", "date": b.date}
+            if dt in critical_types:
+                categories["CRITIQUE"].append(entry)
+            elif dt in high_types:
+                categories["ELEVE"].append(entry)
+            elif dt in medium_types:
+                categories["MOYEN"].append(entry)
+            else:
+                categories["FAIBLE"].append(entry)
+
+    for w in (whois_results or []):
+        if w and w.get("registrant_name"):
+            if "whois_name" not in seen:
+                seen.add("whois_name")
+                categories["MOYEN"].append({"type": "Nom (WHOIS)", "source": f"WHOIS: {w['domain']}", "date": ""})
+            if w.get("registrant_address") and "whois_address" not in seen:
+                seen.add("whois_address")
+                categories["ELEVE"].append({"type": "Adresse (WHOIS)", "source": f"WHOIS: {w['domain']}", "date": ""})
+
+    for r in (reputation_results or []):
+        if r.get("credentials_leaked") and "creds_leaked" not in seen:
+            seen.add("creds_leaked")
+            categories["CRITIQUE"].append({"type": "Credentials leaked (reputation)", "source": f"emailrep: {r.get('email', '')}", "date": ""})
+
+    nb = len(findings or [])
+    if nb > 0 and "public_accounts" not in seen:
+        seen.add("public_accounts")
+        categories["FAIBLE"].append({"type": f"{nb} comptes publics detectes", "source": "Scan de comptes", "date": ""})
+
+    return categories
+
 def compute_risk_score(findings, breaches, companies, phone_infos, whois_results,
                        reputation_results=None, dns_results=None):
     """Compute a weighted risk score (0-100) and level (FAIBLE/MOYEN/ELEVE/CRITIQUE)."""
@@ -823,6 +892,11 @@ def build_google_dorks(nom=None, emails=None, phones=None, usernames=None):
         dorks.append(_dork("Nom + fichiers (PDF, XLS)", f'"{q}" filetype:pdf OR filetype:xls OR filetype:doc'))
         dorks.append(_dork("Nom + justice / tribunal", f'"{q}" tribunal OR jugement OR condamnation OR justice'))
         dorks.append(_dork("Nom + BODACCs (publications legales)", f'site:bodacc.fr "{q}"'))
+        dorks.append(_dork("Nom + OpenCorporates (international)", f'site:opencorporates.com "{q}"'))
+        dorks.append(_dork("Nom + Companies House (UK)", f'site:find-and-update.company-information.service.gov.uk "{q}"'))
+        dorks.append(_dork("Nom + KBO (Belgique)", f'site:kbopub.economie.fgov.be "{q}"'))
+        dorks.append(_dork("Nom + RCS Luxembourg", f'site:lbr.lu "{q}"'))
+        dorks.append(_dork("Nom + Handelsregister (Suisse)", f'site:zefix.ch "{q}"'))
         dorks.append(_dork("Nom + Viadeo / Indeed / emploi", f'"{q}" site:viadeo.com OR site:indeed.fr OR site:pole-emploi.fr'))
         dorks.append(_dork("Nom + forum / avis", f'"{q}" forum OR avis OR commentaire OR review'))
     for email in (emails or []):
@@ -1487,7 +1561,7 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
         "- Un pseudo identique ne prouve pas qu'il s'agit de la meme personne.",
         "- L'absence de resultat ne prouve pas l'absence d'exposition.",
         "- Seules des sources publiques et gratuites ont ete interrogees.",
-        "- La recherche d'entreprise couvre uniquement les registres francais (Pappers.fr).",
+        "- La recherche d'entreprise couvre les registres francais (Pappers.fr) et internationaux (OpenCorporates), mais de facon non exhaustive.",
         "- Les fuites de donnees ne sont verifiees que via les bases gratuites (HIBP sans cle API, h8mail).",
         "- L'API HIBP v3 necessite une cle payante pour des resultats complets ; sans cle, les resultats peuvent etre partiels.",
         "",

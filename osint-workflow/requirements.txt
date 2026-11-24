@@ -4,3 +4,4 @@ sherlock-project
 phonenumbers
 python-whois
 h8mail
+weasyprint

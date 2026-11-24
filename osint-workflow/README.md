@@ -41,8 +41,10 @@ venv\Scripts\pip install -r requirements.txt
 | `--username`, `-u` | Pseudo a analyser (repetable) |
 | `--phone`, `-p` | Numero de telephone (repetable, format international recommande) |
 | `--nom`, `-n` | Nom complet (active la recherche d'entreprise et les Google dorks) |
+| `--prenom` | Prenom de la personne (ameliore la recherche famille/proches) |
+| `--dob` | Date de naissance (JJ/MM/AAAA, active les dorks par age et date de naissance) |
 | `--all-sites` / `--top-sites N` | Etendue de la recherche Maigret (defaut : top 500) |
-| `--skip OUTIL` | Ne pas lancer un module : `holehe`, `sherlock`, `maigret`, `breach`, `company`, `whois`, `phone`, `reputation`, `wayback`, `dns`, `paste` |
+| `--skip OUTIL` | Ne pas lancer un module : `holehe`, `sherlock`, `maigret`, `breach`, `company`, `whois`, `phone`, `reputation`, `wayback`, `dns`, `paste`, `social`, `family` |
 | `--timeout`, `--tool-timeout` | Timeout par requete (10 s) et duree maximale par outil (1800 s) |
 | `--pdf` | Generer un export PDF en plus du Markdown (necessite `weasyprint`) |
 | `--config CHEMIN` | Fichier config.json alternatif (cles API, options par defaut) |
@@ -51,7 +53,7 @@ venv\Scripts\pip install -r requirements.txt
 
 Chaque audit cree `reports/<date>_<mandat>/` (jamais versionne) :
 
-- `RAPPORT.md` : livrable client complet avec 17 sections
+- `RAPPORT.md` : livrable client complet avec 18+ sections
 - `resultats.json` : memes donnees, exploitables par un autre outil
 - `brut/` : journaux et exports de chaque outil
 
@@ -61,7 +63,7 @@ Chaque audit cree `reports/<date>_<mandat>/` (jamais versionne) :
 2. **Profil synthetique** : nom, bio, localisation, profession extraits des profils trouves
 3. **Analyse telephone** : validation, operateur, type de ligne, pays
 4. **Fuites de donnees** : breaches connues via HIBP / h8mail avec types de donnees exposees
-5. **Entreprises** : registres francais (Pappers.fr), adresse du siege, role du dirigeant
+5. **Entreprises** : registres francais (Pappers.fr) et internationaux (OpenCorporates), adresse du siege, role du dirigeant
 6. **WHOIS** : domaines email personnels, exposition du nom et de l'adresse du proprietaire
 7. **Reputation email** : reputation, blacklist, credentials leaked, profils detectes (emailrep.io)
 8. **Detail des scans** : tableau de synthese par outil
@@ -74,6 +76,7 @@ Chaque audit cree `reports/<date>_<mandat>/` (jamais versionne) :
 15. **DNS** : enregistrements MX, SPF, DMARC des domaines email personnels, hebergeur detecte
 16. **Wayback Machine** : historique d'archivage des profils trouves (plus ancien/recent snapshot)
 17. **Liens directs** : liens de verification manuelle vers les plateformes majeures
+18. **Famille et proches** : dorks genealogiques (Geneanet, Filae), annuaires inverses, registres civils, avis de deces, recherche par age/date de naissance
 
 ## Modules d'investigation
 
@@ -83,7 +86,7 @@ Chaque audit cree `reports/<date>_<mandat>/` (jamais versionne) :
 | Sherlock | Pseudo | Profils sur 400+ sites |
 | Maigret | Pseudo | Profils sur 3000+ sites + infos de profil (nom, bio, localisation) |
 | Breach check | Email | Fuites de donnees (HIBP, h8mail) |
-| Pappers.fr | Nom | Entreprises liees (dirigeant, siege, SIREN) |
+| Pappers.fr + OpenCorporates | Nom | Entreprises liees (FR + international, dirigeant, siege, SIREN) |
 | phonenumbers | Telephone | Validation, operateur, pays, type de ligne |
 | WHOIS | Email | Proprietaire de domaines email personnels |
 | emailrep.io | Email | Reputation, blacklist, profils sociaux detectes, credentials leaked |
@@ -91,6 +94,10 @@ Chaque audit cree `reports/<date>_<mandat>/` (jamais versionne) :
 | DNS (dig) | Domaines email | MX, SPF, DMARC, hebergeur email (Google Workspace, Microsoft 365, OVH...) |
 | Paste search | Tous | Liens vers Pastebin, GitHub Gists, IntelligenceX, Dehashed |
 | Google dorks | Tous | Liens de recherche avancee a ouvrir manuellement |
+| Family dorks | Nom, prenom, DOB | Geneanet, Filae, annuaires inverses, etat civil, necrologie, recherche par age |
+| Permutations | Nom, pseudos, emails | Variantes de pseudos generees automatiquement pour elargir la recherche |
+| Correlations | Toutes sources | Recoupements detectes entre les donnees (memes pseudos, multi-fuites, identite WHOIS) |
+| Score de risque | Toutes sources | Score pondere 0-100 avec niveau FAIBLE/MOYEN/ELEVE/CRITIQUE |
 
 Les scans de la phase 1 (comptes) et de la phase 2 (analyse approfondie) tournent en parallele.
 
