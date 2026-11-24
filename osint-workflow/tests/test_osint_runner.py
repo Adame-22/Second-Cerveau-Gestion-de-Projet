@@ -454,6 +454,36 @@ class RiskScoreTest(unittest.TestCase):
         self.assertGreater(score_with, score_without)
 
 
+class CorrelationTest(unittest.TestCase):
+    def test_detects_reused_pseudo(self):
+        findings = [
+            runner.Finding("bob", "username", "GitHub", "https://github.com/bob", ["sherlock"]),
+            runner.Finding("bob", "username", "Twitter", "https://twitter.com/bob", ["sherlock"]),
+            runner.Finding("bob", "username", "Reddit", "https://reddit.com/u/bob", ["sherlock"]),
+        ]
+        corr = runner.build_correlations(findings, {}, [], [])
+        types = [c["type"] for c in corr]
+        self.assertIn("pseudo_reutilise", types)
+
+    def test_detects_multi_breach_email(self):
+        breaches = [
+            runner.BreachInfo("a@b.com", "Leak1", "2023", ["Passwords"]),
+            runner.BreachInfo("a@b.com", "Leak2", "2024", ["Email addresses"]),
+        ]
+        corr = runner.build_correlations([], {}, breaches, [])
+        types = [c["type"] for c in corr]
+        self.assertIn("email_multi_fuites", types)
+
+    def test_detects_whois_identity(self):
+        corr = runner.build_correlations([], {}, [], [{"registrant_name": "Jean", "domain": "ex.com"}])
+        types = [c["type"] for c in corr]
+        self.assertIn("whois_identite", types)
+
+    def test_empty_inputs(self):
+        corr = runner.build_correlations([], {}, [], [])
+        self.assertEqual(corr, [])
+
+
 class CsvExportTest(unittest.TestCase):
     def test_export_accounts_csv(self):
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))

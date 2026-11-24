@@ -839,6 +839,51 @@ def build_google_dorks(nom=None, emails=None, phones=None, usernames=None):
     return dorks
 
 
+# --- Family / relatives search dorks ---
+
+def build_family_search_dorks(nom=None, prenom=None, dob=None, phones=None):
+    dorks = []
+    if not nom:
+        return dorks
+    q = nom
+    full = f"{prenom} {nom}" if prenom else nom
+
+    dorks.append(_dork("Geneanet (genealogie)", f'site:geneanet.org "{q}"'))
+    dorks.append(_dork("Filae (genealogie)", f'site:filae.com "{q}"'))
+    dorks.append(_dork("118712 (annuaire inverse)", f'site:118712.fr "{q}"'))
+    dorks.append(_dork("Copains d'Avant (camarades)", f'site:copainsdavant.linternaute.com "{q}"'))
+    dorks.append(_dork("Famille / proches", f'"{full}" famille OR parent OR frere OR soeur OR conjoint OR epoux OR epouse'))
+    dorks.append(_dork("Etat civil / actes", f'"{full}" acte OR naissance OR mariage OR deces OR etat-civil'))
+    dorks.append(_dork("Avis de deces / necrologie", f'"{full}" "avis de deces" OR necrologie OR obseques'))
+    dorks.append(_dork("Societe.com (dirigeant/associe)", f'site:societe.com "{q}" dirigeant OR associe'))
+    dorks.append(_dork("Pages Blanches (foyer)", f'site:pagesjaunes.fr "{full}" OR site:pagesblanches.fr "{full}"'))
+    dorks.append(_dork("Registre commerce (famille)", f'"{q}" SIREN OR SIRET OR "registre du commerce"'))
+
+    if prenom:
+        dorks.append(_dork(f"Prenom + nom complet", f'"{prenom} {nom}"'))
+        dorks.append(_dork(f"Prenom + nom + adresse", f'"{prenom} {nom}" adresse OR domicile OR habite'))
+
+    if dob:
+        try:
+            parts = dob.split("/")
+            if len(parts) == 3:
+                day, month, year = int(parts[0]), int(parts[1]), int(parts[2])
+                birth_year = year
+                age = 2026 - birth_year
+                dorks.append(_dork(f"Annee de naissance ({birth_year})",
+                                   f'"{full}" {birth_year} OR "ne en {birth_year}" OR "nee en {birth_year}"'))
+                dorks.append(_dork(f"Age ({age} ans)", f'"{full}" "{age} ans"'))
+                dorks.append(_dork(f"Date de naissance", f'"{full}" "{day:02d}/{month:02d}/{birth_year}"'))
+        except (ValueError, IndexError):
+            pass
+
+    for phone in (phones or []):
+        clean = phone.replace(" ", "").replace("-", "").replace(".", "")
+        dorks.append(_dork(f"Telephone + annuaire ({phone})", f'"{clean}" annuaire OR "pages blanches" OR 118712'))
+
+    return dorks
+
+
 # --- NEW: Extract enriched profile data from Maigret ---
 
 def extract_profile_details(runs):
@@ -947,6 +992,73 @@ def build_identity_card(opts, profile_details, phone_infos, companies, whois_res
     return card
 
 
+# --- Cross-reference correlation ---
+
+def build_correlations(findings, profile_details, breaches, whois_results, reputation_results=None):
+    """Detect links and patterns across all data sources."""
+    correlations = []
+
+    sites_by_identifier = {}
+    for f in (findings or []):
+        sites_by_identifier.setdefault(f.identifier, []).append(f.site)
+    for ident, sites in sites_by_identifier.items():
+        if len(sites) >= 3:
+            correlations.append({
+                "type": "pseudo_reutilise",
+                "detail": f"Le pseudo '{ident}' est utilise sur {len(sites)} plateformes : {', '.join(sites[:8])}",
+                "risk": "Le meme pseudo facilite le regroupement de comptes par un tiers.",
+            })
+
+    email_breach_map = {}
+    for b in (breaches or []):
+        email_breach_map.setdefault(b.email, []).append(b.breach_name)
+    for email, bnames in email_breach_map.items():
+        if len(bnames) >= 2:
+            correlations.append({
+                "type": "email_multi_fuites",
+                "detail": f"L'email '{email}' apparait dans {len(bnames)} fuites : {', '.join(bnames[:5])}",
+                "risk": "Un attaquant peut recouper les donnees de plusieurs fuites pour construire un profil complet.",
+            })
+
+    if profile_details:
+        bio_values = profile_details.get("bio", [])
+        if len(bio_values) >= 2:
+            unique_bios = set(b.lower().strip() for b in bio_values if len(b) > 10)
+            if len(unique_bios) == 1:
+                correlations.append({
+                    "type": "bio_identique",
+                    "detail": "La meme bio est utilisee sur plusieurs plateformes.",
+                    "risk": "Facilite la correlation automatique des comptes.",
+                })
+
+        names = profile_details.get("fullname", [])
+        if names:
+            correlations.append({
+                "type": "nom_reel_expose",
+                "detail": f"Le nom reel apparait sur des profils publics : {', '.join(names[:5])}",
+                "risk": "Le nom reel est directement lie aux pseudos en ligne.",
+            })
+
+    whois_names = [w.get("registrant_name") for w in (whois_results or []) if w and w.get("registrant_name")]
+    if whois_names:
+        correlations.append({
+            "type": "whois_identite",
+            "detail": f"L'identite est exposee dans les WHOIS : {', '.join(whois_names)}",
+            "risk": "Le WHOIS lie le nom reel a des domaines, donc potentiellement a des sites web personnels.",
+        })
+
+    rep_valid = [r for r in (reputation_results or []) if not r.get("error")]
+    for r in rep_valid:
+        if r.get("credentials_leaked") and r.get("data_breach"):
+            correlations.append({
+                "type": "reputation_credentials_et_breach",
+                "detail": f"L'email '{r['email']}' : identifiants fuites ET fuite de donnees confirmee.",
+                "risk": "Risque eleve de prise de controle de compte (credential stuffing).",
+            })
+
+    return correlations
+
+
 # --- Report ---
 
 def cell(text):
@@ -955,7 +1067,7 @@ def cell(text):
 
 def render_report(opts, runs, findings, started, breaches, companies, phone_infos, whois_results, dorks, profile_details,
                    reputation_results=None, wayback_results=None, dns_results=None, paste_urls=None, identity_card=None,
-                   username_permutations=None, risk_score=None):
+                   username_permutations=None, risk_score=None, correlations=None, family_dorks=None):
     by_kind = {"username": [], "email": []}
     for finding in findings:
         by_kind[finding.kind].append(finding)
@@ -1034,6 +1146,17 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
             out.append(f"| **Exposition** | **{', '.join(counts)}** |")
         out.append("")
         out.append("*Ce tableau consolide les informations trouvees par tous les modules. Verifier chaque element avec le client.*")
+
+    # --- Correlations ---
+    _corr = correlations or []
+    if _corr:
+        out += ["", "### Correlations detectees", ""]
+        out.append("Points de recoupement entre les differentes sources :")
+        out.append("")
+        for c in _corr:
+            out.append(f"- **{c['type'].replace('_', ' ').capitalize()}** : {c['detail']}")
+            out.append(f"  - *Risque :* {c['risk']}")
+        out.append("")
 
     # --- Profil synthetique (extracted from Maigret) ---
     if profile_details:
@@ -1259,19 +1382,57 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
                         out.append(f"| {cell(u['platform'])} | [Verifier]({u['url']}) |")
                     out.append("")
 
+    # --- Exposure matrix ---
+    if findings or breaches:
+        out += ["", "---", "", "## Matrice d'exposition", ""]
+        out.append("| Source | Identifiant | Donnees exposees | Risque |")
+        out.append("|---|---|---|---|")
+        for b in breaches:
+            types = ", ".join(b.data_types[:5]) if b.data_types else "inconnu"
+            sensitive = {"Passwords", "Credit cards", "Phone numbers", "Physical addresses",
+                         "Social security numbers", "Bank account numbers"}
+            level = "CRITIQUE" if sensitive & set(b.data_types) else "ELEVE"
+            out.append(f"| Fuite: {cell(b.breach_name)} | {cell(b.email)} | {cell(types)} | {level} |")
+        whois_exposed = [w for w in (whois_results or []) if w and w.get("registrant_name")]
+        for w in whois_exposed:
+            out.append(f"| WHOIS | {cell(w['domain'])} | Nom, adresse du proprietaire | ELEVE |")
+        rep_leaked = [r for r in (reputation_results or []) if not r.get("error") and r.get("credentials_leaked")]
+        for r in rep_leaked:
+            out.append(f"| Reputation | {cell(r['email'])} | Credentials leaked | ELEVE |")
+
+    # --- Family search dorks ---
+    _fam = family_dorks or []
+    if _fam:
+        out += ["", "## 18. Recherche famille et proches (Google dorks)", "",
+                "Liens a ouvrir manuellement pour rechercher des proches, liens familiaux et registres civils :", ""]
+        out.append("| Recherche | Lien |")
+        out.append("|---|---|")
+        for d in _fam:
+            out.append(f"| {cell(d['label'])} | [Ouvrir]({d['url']}) |")
+
     # --- Action plan ---
+    _rs = risk_score if risk_score is not None else 0
     out += ["", "---", "", "## Plan d'action", ""]
+
+    if _rs >= 70:
+        out += ["**URGENCE : score de risque CRITIQUE ({}/100). Actions immediates requises.**".format(_rs), ""]
+    elif _rs >= 40:
+        out += ["**ATTENTION : score de risque ELEVE ({}/100). Actions correctives recommandees sous 7 jours.**".format(_rs), ""]
 
     if breaches:
         out += [
             "### Priorite 1 : Fuites de donnees",
             "",
-            "- [ ] Changer immediatement les mots de passe des services concernes par les fuites.",
+            "- [ ] **IMMEDIAT** : Changer les mots de passe des services concernes par les fuites.",
             "- [ ] Verifier sur https://haveibeenpwned.com si d'autres emails ont fuite.",
             "- [ ] Activer la double authentification (2FA) sur tous les comptes sensibles.",
             "- [ ] Surveiller les releves bancaires (risque d'usurpation d'identite).",
-            "",
         ]
+        pwd_breaches = [b for b in breaches if "Passwords" in b.data_types]
+        if pwd_breaches:
+            out.append(f"- [ ] **CRITIQUE** : {len(pwd_breaches)} fuite(s) contiennent des mots de passe. "
+                        "Changer TOUS les mots de passe identiques sur d'autres services.")
+        out.append("")
 
     if companies:
         out += [
@@ -1282,6 +1443,16 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
             "- [ ] Contacter Pappers.fr et societe.com pour demander le masquage de certaines donnees.",
             "",
         ]
+
+    _dns_no_spf = [d for d in (dns_results or []) if hasattr(d, "spf") and not d.spf]
+    _dns_no_dmarc = [d for d in (dns_results or []) if hasattr(d, "dmarc") and not d.dmarc]
+    if _dns_no_spf or _dns_no_dmarc:
+        out += ["### Priorite 2b : Securite email (DNS)", ""]
+        for d in _dns_no_spf:
+            out.append(f"- [ ] Configurer un enregistrement SPF sur **{d.domain}** pour empecher l'usurpation.")
+        for d in _dns_no_dmarc:
+            out.append(f"- [ ] Configurer un enregistrement DMARC sur **{d.domain}** pour proteger la reputation email.")
+        out.append("")
 
     if findings:
         out += [
@@ -1304,6 +1475,12 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
         "- [ ] Pour les contenus non supprimables : demande d'effacement (RGPD art. 17), puis dereferencement Google.",
         "- [ ] Utiliser a l'avenir un pseudo et un email differents par service.",
         "- [ ] Ouvrir les liens Google dorks de la section 12 pour trouver d'autres traces.",
+        "",
+        "### Suivi",
+        "",
+        "- [ ] Planifier un audit de suivi dans 3 mois.",
+        "- [ ] Mettre en place des alertes Google sur le nom et les pseudos du client.",
+        "- [ ] S'inscrire aux notifications HIBP pour les emails surveilles.",
         "",
         "## Limites",
         "",
@@ -1330,11 +1507,13 @@ def parse_args(argv=None):
     parser.add_argument("--username", "-u", action="append", default=[], help="Pseudo a analyser (repetable)")
     parser.add_argument("--phone", "-p", action="append", default=[], help="Numero de telephone (repetable)")
     parser.add_argument("--nom", "-n", help="Nom complet de la personne (active la recherche d'entreprise et les dorks)")
+    parser.add_argument("--prenom", help="Prenom de la personne (ameliore la recherche famille/proches)")
+    parser.add_argument("--dob", help="Date de naissance (JJ/MM/AAAA, active les dorks par age)")
     parser.add_argument("--all-sites", action="store_true", help="Maigret : tous les sites (long)")
     parser.add_argument("--top-sites", type=int, default=500, help="Maigret : nombre de sites (defaut 500)")
     parser.add_argument("--skip", action="append", default=[],
                         choices=["holehe", "sherlock", "maigret", "breach", "company", "whois", "phone",
-                                 "reputation", "wayback", "dns", "paste", "social"],
+                                 "reputation", "wayback", "dns", "paste", "social", "family"],
                         help="Module a ne pas lancer (repetable)")
     parser.add_argument("--timeout", type=int, default=10, help="Timeout par requete (defaut 10)")
     parser.add_argument("--tool-timeout", type=int, default=1800, help="Duree max par outil (defaut 1800)")
@@ -1498,6 +1677,12 @@ def main(argv=None):
     profile_details = extract_profile_details(runs)
     dorks = build_google_dorks(opts.nom, opts.email, opts.phone, opts.username)
 
+    family_dorks = []
+    if opts.nom and "family" not in opts.skip:
+        family_dorks = build_family_search_dorks(
+            nom=opts.nom, prenom=getattr(opts, "prenom", None),
+            dob=getattr(opts, "dob", None), phones=opts.phone)
+
     identity_card = build_identity_card(opts, profile_details, phone_infos, companies, whois_results,
                                          reputation_results=reputation_results, breaches=breaches, findings=findings)
 
@@ -1506,6 +1691,9 @@ def main(argv=None):
 
     risk_score, risk_level = compute_risk_score(findings, breaches, companies, phone_infos, whois_results,
                                                  reputation_results=reputation_results, dns_results=dns_results)
+
+    correlations = build_correlations(findings, profile_details, breaches, whois_results,
+                                       reputation_results=reputation_results)
 
     (report_dir / "resultats.json").write_text(
         json.dumps(
@@ -1533,6 +1721,8 @@ def main(argv=None):
                 "username_permutations": username_permutations,
                 "risk_score": risk_score,
                 "risk_level": risk_level,
+                "correlations": correlations,
+                "family_dorks": family_dorks,
             },
             indent=2, ensure_ascii=False,
         ),
@@ -1544,11 +1734,13 @@ def main(argv=None):
         render_report(opts, runs, findings, started, breaches, companies, phone_infos, whois_results, dorks, profile_details,
                       reputation_results=reputation_results, wayback_results=wayback_results,
                       dns_results=dns_results, paste_urls=paste_urls, identity_card=identity_card,
-                      username_permutations=username_permutations, risk_score=risk_score),
+                      username_permutations=username_permutations, risk_score=risk_score,
+                      correlations=correlations, family_dorks=family_dorks),
         encoding="utf-8",
     )
 
-    print(f"[*] Resultat : {len(findings)} comptes, {len(breaches)} fuites, {len(companies)} entreprises")
+    print(f"[*] Resultat : {len(findings)} comptes, {len(breaches)} fuites, {len(companies)} entreprises, "
+          f"score={risk_score}/100 ({risk_level}), {len(correlations)} correlation(s)")
     print(f"[*] Rapport : {report_file}")
 
     # CSV exports
