@@ -12,6 +12,14 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
+Sous Windows (PowerShell), puis utiliser `.\run.bat` a la place de `./run.sh` :
+
+```powershell
+cd osint-workflow
+py -m venv venv
+venv\Scripts\pip install -r requirements.txt
+```
+
 ## Usage
 
 ```bash

@@ -4,6 +4,7 @@
 import argparse
 import csv
 import json
+import os
 import re
 import subprocess
 import sys
@@ -13,7 +14,6 @@ from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-VENV_BIN = ROOT / "venv" / "bin"
 REPORTS_DIR = ROOT / "reports"
 
 EMAIL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._%+\-]*@[A-Za-z0-9][A-Za-z0-9.\-]*\.[A-Za-z]{2,}$")
@@ -40,6 +40,11 @@ class ToolRun:
     note: str = ""
     findings: list = field(default_factory=list)
     leads: list = field(default_factory=list)
+
+
+def tool(name):
+    """Chemin de l'outil installe a cote de l'interpreteur du venv (bin/ sous Linux et macOS, Scripts\\ sous Windows)."""
+    return str(Path(sys.executable).parent / (name + (".exe" if os.name == "nt" else "")))
 
 
 def safe_name(value):
@@ -119,7 +124,7 @@ def run_holehe(email, raw_dir, opts):
     work_dir.mkdir(parents=True)
     code, _ = execute(
         # Pas de --timeout : holehe 1.61 le transmet comme chaine a httpx et toutes les requetes echouent.
-        [str(VENV_BIN / "holehe"), email, "--only-used", "--no-color", "--no-clear", "--csv"],
+        [tool("holehe"), email, "--only-used", "--no-color", "--no-clear", "--csv"],
         work_dir / "sortie.log", work_dir, opts.tool_timeout,
     )
     csv_files = list(work_dir.glob("holehe_*_results.csv"))
@@ -136,7 +141,7 @@ def run_sherlock(username, raw_dir, opts):
     work_dir = raw_dir / f"sherlock_{safe_name(username)}"
     work_dir.mkdir(parents=True)
     code, output = execute(
-        [str(VENV_BIN / "sherlock"), username, "--print-found", "--no-color",
+        [tool("sherlock"), username, "--print-found", "--no-color",
          "--timeout", str(opts.timeout), "--folderoutput", str(work_dir)],
         work_dir / "sortie.log", work_dir, opts.tool_timeout,
     )
@@ -152,7 +157,7 @@ def run_maigret(username, raw_dir, opts):
     work_dir.mkdir(parents=True)
     scope = ["--all-sites"] if opts.all_sites else ["--top-sites", str(opts.top_sites)]
     code, output = execute(
-        [str(VENV_BIN / "maigret"), username, "--no-color", "--no-progressbar", "--no-recursion",
+        [tool("maigret"), username, "--no-color", "--no-progressbar", "--no-recursion",
          "--timeout", str(opts.timeout), "--json", "simple", "--html", "--folderoutput", str(work_dir)] + scope,
         work_dir / "sortie.log", work_dir, opts.tool_timeout,
     )
