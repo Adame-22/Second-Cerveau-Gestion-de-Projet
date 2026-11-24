@@ -57,7 +57,7 @@ Chaque audit cree `reports/<date>_<mandat>/` (jamais versionne) :
 
 ### Sections du rapport
 
-1. **Synthese executive** : niveau d'exposition global (FAIBLE/MOYEN/ELEVE), compteurs
+1. **Synthese executive** : niveau d'exposition global (FAIBLE/MOYEN/ELEVE), compteurs, fiche d'identite numerique consolidee
 2. **Profil synthetique** : nom, bio, localisation, profession extraits des profils trouves
 3. **Analyse telephone** : validation, operateur, type de ligne, pays
 4. **Fuites de donnees** : breaches connues via HIBP / h8mail avec types de donnees exposees

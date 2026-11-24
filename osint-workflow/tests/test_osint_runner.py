@@ -280,7 +280,7 @@ class IdentityCardTest(unittest.TestCase):
         self.assertEqual(card["nom"], "Jean Dupont")
         self.assertEqual(card["noms_detectes"], ["Jean Dupont"])
         self.assertIn("Paris", card["localisations"])
-        self.assertEqual(card["operateurs"], {"SFR"})
+        self.assertEqual(card["operateurs"], ["SFR"])
         self.assertEqual(card["entreprises_registre"][0]["nom"], "ACME SAS")
         self.assertEqual(card["domaines_personnels"], ["custom-domain.fr"])
         self.assertEqual(card["profils_reputation"], ["linkedin"])
