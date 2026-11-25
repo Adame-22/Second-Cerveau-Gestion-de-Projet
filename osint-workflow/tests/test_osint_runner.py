@@ -1533,3 +1533,47 @@ class TestControlVerification(unittest.TestCase):
         self.assertEqual([f.site for f in kept], ["A", "C"])
         self.assertEqual([f.site for f in doubtful], ["B"])
         self.assertEqual(kept[0].details["verification"], "confirme")
+
+
+class TestCompanyAndBodacc(unittest.TestCase):
+    def test_same_person(self):
+        self.assertTrue(runner._is_same_person("Léandre Cazé", "CAZE", "Léandre Gérard"))
+        self.assertTrue(runner._is_same_person("Jean-Pierre Martin", "MARTIN", "Jean-Pierre"))
+        self.assertFalse(runner._is_same_person("Léandre Cazé", "CAZE", "Paul"))
+        self.assertFalse(runner._is_same_person("Léandre Cazé", "", ""))
+
+    def test_company_search_keeps_exact_and_reads_status(self):
+        fake = {"resultats_nom_complet": [
+            {"nom_entreprise": "CAZE LEANDRE", "nom": "CAZE", "prenom": "LEANDRE", "personne_morale": False,
+             "siren": "111", "statut_consolide": "cesse", "entreprise_cessee": 1, "date_cessation": "2024-05-06",
+             "libelle_code_naf": "Entretien et reparation de vehicules", "siege": {"code_postal": "77000", "ville": "MELUN"}},
+            {"nom_entreprise": "CAZE PAUL", "nom": "CAZE", "prenom": "PAUL", "personne_morale": False, "siren": "222"}]}
+        with patch.object(runner, "http_get_json", return_value=fake):
+            cs = runner.run_company_search("Léandre Cazé", Path(tempfile.mkdtemp()))
+        self.assertEqual([c.siren for c in cs], ["111"])
+        self.assertEqual(cs[0].status, "Cessee")
+        self.assertEqual(cs[0].cessation_date, "2024-05-06")
+        self.assertIn("vehicules", cs[0].activity)
+
+    def test_bodacc_name_filter(self):
+        fake = {"results": [
+            {"id": "A1", "dateparution": "2024-06-01", "familleavis_lib": "Radiations",
+             "commercant": "CAZE (Léandre, Gérard)", "registre": ["111 111 111", "111111111"],
+             "radiationaurcs": '{"commentaire": "Date de cessation 6 mai 2024"}'},
+            {"id": "A2", "dateparution": "2020-01-01", "familleavis_lib": "Radiations",
+             "commercant": "CAZE (Paul)", "registre": ["222222222"]}]}
+        with patch.object(runner, "http_get_json", return_value=fake):
+            ns = runner.run_bodacc_search("Léandre Cazé", [], None)
+        self.assertEqual([n["siren"] for n in ns], ["111111111"])
+        self.assertIn("Radiation", ns[0]["detail"])
+
+    def test_representant_only_exact_person(self):
+        fake = {"resultats_representant": [
+            {"nom": "CAZE", "prenom": "Léandre", "qualite": "Gerant", "actuel": True, "date_de_naissance_rgpd_formatee": "01/1990",
+             "ville_de_naissance": "MELUN", "adresse_ligne_1": "1 rue X", "code_postal": "77000", "ville": "MELUN"},
+            {"nom": "CAZE", "prenom": "Paul", "qualite": "President", "adresse_ligne_1": "2 rue Y"}]}
+        with patch.object(runner, "http_get_json", return_value=fake):
+            cs = runner.run_company_search("Léandre Cazé", Path(tempfile.mkdtemp()))
+        self.assertEqual(len(cs), 1)
+        self.assertIn("adresse personnelle", cs[0].exposed)
+        self.assertIn("01/1990", cs[0].exposed)

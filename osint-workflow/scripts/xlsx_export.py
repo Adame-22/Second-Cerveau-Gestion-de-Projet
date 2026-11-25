@@ -105,11 +105,16 @@ def export_xlsx(json_path, xlsx_path=None):
 
     # --- Entreprises ---
     ws4 = wb.create_sheet("Entreprises")
-    ws4.append(["Nom", "SIREN", "Role", "Adresse", "Source"])
-    _style_header(ws4, 5)
+    ws4.append(["Nom", "SIREN", "Role", "Statut", "Activite", "Adresse", "Creation", "Cessation",
+                "Donnees personnelles publiees", "Source"])
+    _style_header(ws4, 10)
     for c in data.get("entreprises", []):
-        ws4.append([c.get("name", ""), c.get("siren", ""), c.get("role", ""),
-                     c.get("address", ""), c.get("source", "")])
+        ws4.append([c.get("name", ""), c.get("siren", ""), c.get("role", ""), c.get("status", ""),
+                    c.get("activity", ""), c.get("address", ""), c.get("creation_date", ""),
+                    c.get("cessation_date", ""), c.get("exposed", ""), c.get("source", "")])
+        if c.get("exposed"):
+            for col in range(1, 11):
+                ws4.cell(row=ws4.max_row, column=col).fill = WARN_FILL
     _auto_width(ws4)
     _add_borders(ws4)
 
@@ -150,6 +155,11 @@ def export_xlsx(json_path, xlsx_path=None):
                     sh.cell(row=sh.max_row, column=col).fill = fill
         _auto_width(sh)
         _add_borders(sh)
+
+    if data.get("bodacc"):
+        _sheet("BODACC", ["Date", "Type", "Entreprise / personne", "SIREN", "Lieu", "Tribunal", "Detail", "Lien"],
+               [[n["date"], n["type"], n["entreprise"], n["siren"], n["ville"], n["tribunal"], n["detail"], n["url"]]
+                for n in data["bodacc"]])
 
     df = data.get("digital_footprint") or {}
     if df.get("category_details"):

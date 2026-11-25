@@ -84,6 +84,10 @@ class CompanyInfo:
     address: str = ""
     creation_date: str = ""
     source: str = ""
+    activity: str = ""
+    cessation_date: str = ""
+    match: str = ""
+    exposed: str = ""
 
 
 @dataclass
@@ -426,87 +430,163 @@ def _run_h8mail_fallback(email, work_dir):
 
 # --- NEW: French company registry search (Pappers.fr free API) ---
 
+def _norm(text):
+    import unicodedata
+    text = unicodedata.normalize("NFKD", str(text or "")).encode("ascii", "ignore").decode()
+    return re.sub(r"[^A-Z0-9]+", " ", text.upper()).strip()
+
+
+def _is_same_person(target_name, last, first):
+    """True when both the last name and the first given name appear in the audited person's name."""
+    tokens = set(_norm(target_name).split())
+    last_tokens = _norm(last).split()
+    first_tokens = _norm(first).split()
+    return bool(last_tokens and first_tokens) and all(t in tokens for t in last_tokens) and first_tokens[0] in tokens
+
+
+def _pappers_status(item):
+    if item.get("entreprise_cessee") or item.get("statut_consolide") == "cesse":
+        return "Cessee"
+    return {"actif": "Active", "inactif": "Inactive"}.get(item.get("statut_consolide"), item.get("statut_rcs", ""))
+
+
 def run_company_search(name, raw_dir):
-    companies = []
+    """Companies tied to a person name (Pappers). Exact person matches are kept; homonyms only if nothing matches."""
     work_dir = raw_dir / "entreprises"
     work_dir.mkdir(parents=True, exist_ok=True)
-
     q = urllib.parse.quote(name)
-    # Pappers free search endpoint (no API key needed for basic search)
-    url = f"https://suggestions.pappers.fr/v2?q={q}&cibles=nom_entreprise,denomination,nom_complet,representant"
-    data = http_get_json(url, timeout=15)
-    if data and isinstance(data, dict):
-        for item in data.get("resultats_nom_entreprise", []):
-            companies.append(CompanyInfo(
-                name=item.get("nom_entreprise", ""),
+    candidates = []
+    data = http_get_json(f"https://suggestions.pappers.fr/v2?q={q}&cibles=nom_entreprise,denomination,nom_complet,representant",
+                         timeout=15)
+    sources = {"resultats_nom_complet": "pappers.fr (entrepreneur individuel)",
+               "resultats_representant": "pappers.fr (dirigeant)",
+               "resultats_nom_entreprise": "pappers.fr (nom d'entreprise)",
+               "resultats_denomination": "pappers.fr (denomination)"}
+    for key, source in sources.items():
+        for item in (data or {}).get(key, []) if isinstance(data, dict) else []:
+            if key == "resultats_representant":
+                if not _is_same_person(name, item.get("nom"), item.get("prenom")):
+                    continue
+                exposed = [label for label, present in (
+                    (f"naissance {item.get('date_de_naissance_rgpd_formatee')}", item.get("date_de_naissance_rgpd_formatee")),
+                    (f"ne(e) a {item.get('ville_de_naissance')}", item.get("ville_de_naissance")),
+                    (f"nationalite {item.get('nationalite')}", item.get("nationalite")),
+                    ("adresse personnelle", item.get("adresse_ligne_1"))) if present]
+                candidates.append(CompanyInfo(
+                    name=item.get("nom_entreprise") or "Mandat de dirigeant",
+                    siren=item.get("siren", ""),
+                    role=item.get("qualite", ""),
+                    status="En poste" if item.get("actuel") else "Ancien mandat",
+                    address=" ".join(filter(None, [item.get("adresse_ligne_1"), item.get("code_postal"), item.get("ville")])),
+                    creation_date=item.get("date_prise_de_poste", ""),
+                    source=source, match="exact", exposed=", ".join(exposed)))
+                continue
+            siege = item.get("siege") or {}
+            person = not item.get("personne_morale") and _is_same_person(name, item.get("nom"), item.get("prenom"))
+            rep = item.get("representant") or {}
+            if not person and isinstance(rep, dict):
+                person = _is_same_person(name, rep.get("nom"), rep.get("prenom"))
+            candidates.append(CompanyInfo(
+                name=item.get("nom_entreprise") or item.get("denomination") or "",
                 siren=item.get("siren", ""),
-                status=item.get("statut", ""),
-                address=f"{item.get('siege', {}).get('adresse_ligne_1', '')} {item.get('siege', {}).get('code_postal', '')} {item.get('siege', {}).get('ville', '')}".strip(),
+                role=item.get("qualite") or ("Entrepreneur individuel" if not item.get("personne_morale") else ""),
+                status=_pappers_status(item),
+                address=" ".join(filter(None, [siege.get("adresse_ligne_1"), siege.get("code_postal"), siege.get("ville")])),
                 creation_date=item.get("date_creation", ""),
-                source="pappers.fr (nom d'entreprise)",
-            ))
-        for item in data.get("resultats_denomination", []):
-            companies.append(CompanyInfo(
-                name=item.get("nom_entreprise", ""),
-                siren=item.get("siren", ""),
-                status=item.get("statut", ""),
-                address=f"{item.get('siege', {}).get('adresse_ligne_1', '')} {item.get('siege', {}).get('code_postal', '')} {item.get('siege', {}).get('ville', '')}".strip(),
-                creation_date=item.get("date_creation", ""),
-                source="pappers.fr (denomination)",
-            ))
-        for item in data.get("resultats_representant", []):
-            companies.append(CompanyInfo(
-                name=item.get("nom_entreprise", ""),
-                siren=item.get("siren", ""),
-                role=item.get("qualite", ""),
-                status=item.get("statut", ""),
-                address=f"{item.get('siege', {}).get('adresse_ligne_1', '')} {item.get('siege', {}).get('code_postal', '')} {item.get('siege', {}).get('ville', '')}".strip(),
-                creation_date=item.get("date_creation", ""),
-                source="pappers.fr (representant)",
-            ))
-        for item in data.get("resultats_nom_complet", []):
-            companies.append(CompanyInfo(
-                name=item.get("nom_entreprise", ""),
-                siren=item.get("siren", ""),
-                role=item.get("qualite", ""),
-                status=item.get("statut", ""),
-                address=f"{item.get('siege', {}).get('adresse_ligne_1', '')} {item.get('siege', {}).get('code_postal', '')} {item.get('siege', {}).get('ville', '')}".strip(),
-                creation_date=item.get("date_creation", ""),
-                source="pappers.fr (nom complet)",
+                cessation_date=item.get("date_cessation") or "",
+                activity=item.get("libelle_code_naf") or item.get("domaine_activite") or "",
+                source=source,
+                match="exact" if person else "",
             ))
 
-    # OpenCorporates search (international, free, no API key)
-    oc_url = f"https://api.opencorporates.com/v0.4/companies/search?q={q}&per_page=5"
-    oc_data = http_get_json(oc_url, timeout=15)
-    if oc_data and isinstance(oc_data, dict):
-        for item in (oc_data.get("results", {}).get("companies", []) or []):
+    api_token = CONFIG.get("opencorporates_api_key")
+    if api_token:
+        oc_data = http_get_json(f"https://api.opencorporates.com/v0.4/companies/search?q={q}&per_page=5"
+                                f"&api_token={urllib.parse.quote(api_token)}", timeout=15)
+        for item in ((oc_data or {}).get("results", {}).get("companies", []) or []):
             co = item.get("company", {})
-            companies.append(CompanyInfo(
-                name=co.get("name", ""),
-                siren=co.get("company_number", ""),
-                status=co.get("current_status", ""),
-                address=co.get("registered_address_in_full", ""),
-                creation_date=co.get("incorporation_date", ""),
+            candidates.append(CompanyInfo(
+                name=co.get("name", ""), siren=co.get("company_number", ""), status=co.get("current_status", ""),
+                address=co.get("registered_address_in_full", ""), creation_date=co.get("incorporation_date", ""),
                 source=f"opencorporates.com ({co.get('jurisdiction_code', '')})",
             ))
 
-    # Deduplicate by SIREN/company number
-    seen = set()
-    unique = []
-    for c in companies:
+    seen, unique = set(), []
+    for c in sorted(candidates, key=lambda c: c.match != "exact"):
         key = (c.siren or c.name).lower()
         if key not in seen:
             seen.add(key)
             unique.append(c)
-    companies = unique
-
+    exact = [c for c in unique if c.match == "exact"]
+    companies = exact or unique[:10]
     (work_dir / "entreprises.json").write_text(
-        json.dumps([asdict(c) for c in companies], indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+        json.dumps([asdict(c) for c in unique], indent=2, ensure_ascii=False), encoding="utf-8")
     return companies
 
 
-# --- NEW: WHOIS on email domain (personal domain = exposed address info) ---
+BODACC_URL = "https://bodacc-datadila.opendatasoft.com/api/explore/v2.1/catalog/datasets/annonces-commerciales/records"
+
+
+def _bodacc_detail(rec):
+    for field_name in ("jugement", "acte", "radiationaurcs", "depot", "modificationsgenerales"):
+        raw = rec.get(field_name)
+        if not raw:
+            continue
+        try:
+            obj = json.loads(raw) if isinstance(raw, str) else raw
+        except ValueError:
+            return str(raw)[:200]
+        if not isinstance(obj, dict):
+            return str(obj)[:200]
+        parts = [obj.get(k) for k in ("nature", "descriptif", "complementJugement", "commentaire")
+                 if isinstance(obj.get(k), str)]
+        if field_name == "radiationaurcs":
+            parts.insert(0, "Radiation du RCS")
+        vente = obj.get("vente") or obj.get("creation") or {}
+        if isinstance(vente, dict) and isinstance(vente.get("categorieVente") or vente.get("categorieCreation"), str):
+            parts.append(vente.get("categorieVente") or vente.get("categorieCreation"))
+        if parts:
+            return " - ".join(parts)[:200]
+    return ""
+
+
+def run_bodacc_search(name=None, sirens=None, raw_dir=None):
+    """Legal notices (creation, closure, insolvency...) from BODACC for given SIRENs and the person's own name."""
+    select = "id,dateparution,familleavis_lib,commercant,ville,cp,tribunal,registre,jugement,acte,radiationaurcs,depot,modificationsgenerales"
+    queries = [f'registre="{re.sub(r"[^0-9]", "", s)}"' for s in (sirens or [])[:5] if re.sub(r"[^0-9]", "", s)]
+    tokens = _norm(name).split() if name else []
+    if len(tokens) >= 2:
+        queries.append(" AND ".join(f'search(commercant,"{t.lower()}")' for t in tokens[:4]))
+    notices, seen = [], set()
+    for where in queries:
+        url = (f"{BODACC_URL}?where={urllib.parse.quote(where)}&limit=50"
+               f"&order_by={urllib.parse.quote('dateparution desc')}&select={urllib.parse.quote(select)}")
+        data = http_get_json(url, timeout=20)
+        for rec in (data or {}).get("results", []) if isinstance(data, dict) else []:
+            if rec.get("id") in seen:
+                continue
+            if where.startswith("search("):
+                head = _norm(rec.get("commercant", "")).split()
+                if not head or not all(t in head for t in tokens):
+                    continue
+            seen.add(rec.get("id"))
+            registre = rec.get("registre") or []
+            notices.append({
+                "date": rec.get("dateparution", ""),
+                "type": rec.get("familleavis_lib", ""),
+                "entreprise": rec.get("commercant", ""),
+                "siren": next((r for r in registre if r.isdigit()), registre[0] if registre else ""),
+                "ville": " ".join(filter(None, [rec.get("cp"), rec.get("ville")])),
+                "tribunal": rec.get("tribunal", ""),
+                "detail": _bodacc_detail(rec),
+                "url": f"https://www.bodacc.fr/pages/annonces-commerciales-detail/?q.id=id:{rec.get('id')}",
+            })
+    notices.sort(key=lambda n: n["date"], reverse=True)
+    if raw_dir:
+        work_dir = raw_dir / "entreprises"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        (work_dir / "bodacc.json").write_text(json.dumps(notices, indent=2, ensure_ascii=False), encoding="utf-8")
+    return notices
 
 def run_whois_lookup(email, raw_dir):
     domain = email.split("@", 1)[1].lower()
@@ -2341,7 +2421,7 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
                    password_reuse=None, digital_footprint=None, executive_summary=None,
                    whois_privacy=None, exposure_heatmap=None,
                    username_intel=None, email_intel=None, password_check_info=None,
-                   doubtful_findings=None):
+                   doubtful_findings=None, bodacc_notices=None):
     by_kind = {"username": [], "email": []}
     for finding in findings:
         by_kind[finding.kind].append(finding)
@@ -2524,18 +2604,34 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
 
     # --- Companies ---
     if companies:
+        exact = [c for c in companies if c.match == "exact"]
         out += ["", S("Entreprises et registres publics"), ""]
-        out.append(f"**{len(companies)} entreprise(s) liee(s) au nom fourni :**")
-        out.append("")
-        out.append("| Entreprise | SIREN | Role | Statut | Adresse | Creation | Source |")
-        out.append("|---|---|---|---|---|---|---|")
+        if exact:
+            out.append(f"**{len(exact)} entreprise(s) au nom exact de la personne (nom et prenom identiques) :**")
+        else:
+            out.append(f"**Aucune entreprise au nom exact ; {len(companies)} resultat(s) proche(s), homonymes possibles a verifier :**")
+        out += ["", "| Entreprise | SIREN | Role | Statut | Activite | Adresse | Creation / prise de poste | Cessation | Donnees personnelles publiees | Source |",
+                "|---|---|---|---|---|---|---|---|---|---|"]
         for c in companies:
-            out.append(f"| {cell(c.name)} | {cell(c.siren)} | {cell(c.role)} | {cell(c.status)} | {cell(c.address)} | {cell(c.creation_date)} | {cell(c.source)} |")
+            out.append(f"| {cell(c.name)} | {cell(c.siren)} | {cell(c.role)} | {cell(c.status)} | {cell(c.activity)} | "
+                       f"{cell(c.address)} | {cell(c.creation_date)} | {cell(c.cessation_date)} | "
+                       f"{('**' + cell(c.exposed) + '**') if c.exposed else '-'} | {cell(c.source)} |")
         out.append("")
-        out.append("**Risques :** l'adresse du siege peut reveler une adresse personnelle (domiciliation a domicile)."
-                    " Les registres publics (Pappers, Infogreffe, societe.com) sont accessibles a tous.")
+        out.append("**Risques :** pour un entrepreneur individuel, l'adresse de l'entreprise est souvent l'adresse personnelle."
+                   " Les registres publics (Pappers, Infogreffe, societe.com, BODACC) sont accessibles a tous et restent"
+                   " consultables apres la fermeture de l'entreprise.")
     else:
         out += ["", S("Entreprises et registres publics"), "", "Aucune entreprise trouvee au nom fourni (recherche France uniquement)."]
+
+    if bodacc_notices:
+        out += ["", S("Annonces legales (BODACC)"), "",
+                "Annonces publiees au Bulletin officiel des annonces civiles et commerciales : creation, modification,"
+                " radiation, procedures collectives. Elles sont publiques et indexees par les moteurs de recherche.", "",
+                "| Date | Type | Entreprise / personne | SIREN | Lieu | Detail | Lien |", "|---|---|---|---|---|---|---|"]
+        for n in bodacc_notices[:30]:
+            out.append(f"| {cell(n['date'])} | {cell(n['type'])} | {cell(n['entreprise'])} | {cell(n['siren'])} | "
+                       f"{cell(n['ville'])} | {cell(n['detail'])} | [Annonce]({n['url']}) |")
+        out.append("")
 
     # --- WHOIS ---
     whois_found = [w for w in whois_results if w is not None]
@@ -3278,6 +3374,7 @@ def main(argv=None):
     log("[*] Phase 2 : analyse approfondie...")
     breaches = []
     companies = []
+    bodacc_notices = []
     phone_infos = []
     whois_results = []
     reputation_results = []
@@ -3357,6 +3454,8 @@ def main(argv=None):
         if company_future:
             companies = company_future.result()
             log(f"  [INFO] Entreprises : {len(companies)} trouvee(s)")
+            bodacc_notices = run_bodacc_search(opts.nom, [c.siren for c in companies if c.match == "exact"], raw_dir)
+            log(f"  [INFO] BODACC : {len(bodacc_notices)} annonce(s) legale(s)")
 
         for f in phone_futures:
             pi = f.result()
@@ -3560,6 +3659,7 @@ def main(argv=None):
                 "email_intel": email_intel,
                 "password_check_info": password_check_info,
                 "comptes_ecartes": [asdict(f) for f in doubtful_findings],
+                "bodacc": bodacc_notices,
             },
             indent=2, ensure_ascii=False,
         ),
@@ -3592,7 +3692,7 @@ def main(argv=None):
                           whois_privacy=whois_privacy, exposure_heatmap=exposure_heatmap,
                           username_intel=username_intel, email_intel=email_intel,
                           password_check_info=password_check_info,
-                          doubtful_findings=doubtful_findings),
+                          doubtful_findings=doubtful_findings, bodacc_notices=bodacc_notices),
             encoding="utf-8",
         )
         log(f"[*] Rapport : {report_file}")
