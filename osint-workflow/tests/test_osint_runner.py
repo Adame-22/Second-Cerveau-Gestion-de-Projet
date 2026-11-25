@@ -1508,3 +1508,28 @@ class TestEndToEndOffline(unittest.TestCase):
         for key in ("executive_summary", "exposure_heatmap", "whois_privacy", "username_intel", "email_intel"):
             self.assertIn(key, data)
         self.assertNotIn("\n## Plan d'action", report)
+
+
+class TestControlVerification(unittest.TestCase):
+    def test_verdicts(self):
+        v = runner._control_verdict
+        self.assertEqual(v(None, (200, "x"), "u", "c")[0], "non verifie")
+        self.assertEqual(v((404, "nf"), (404, "nf"), "bob", "zzz")[0], "douteux")
+        self.assertEqual(v((403, "b"), (403, "b"), "bob", "zzz")[0], "non verifie")
+        self.assertEqual(v((200, "p"), (404, "nf"), "bob", "zzz")[0], "confirme")
+        self.assertEqual(v((200, "<h1>bob</h1>" + "a" * 500), (200, "<h1>zzzzz</h1>" + "a" * 500), "bob", "zzzzz")[0], "douteux")
+        self.assertEqual(v((200, "bob " + "a" * 5000), (200, "zzz " + "a" * 500), "bob", "zzz")[0], "confirme")
+
+    def test_split(self):
+        fs = [runner.Finding("bob", "username", "A", "https://a.com/bob"),
+              runner.Finding("bob", "username", "B", "https://b.com/bob"),
+              runner.Finding("bob@x.com", "email", "C")]
+        def fake(url, timeout=10):
+            if "a.com/bob" in url:
+                return 200, "profil de bob " * 100
+            return 200, "page generique"
+        with patch.object(runner, "_fetch_page", side_effect=fake):
+            kept, doubtful = runner.verify_findings_with_control(fs)
+        self.assertEqual([f.site for f in kept], ["A", "C"])
+        self.assertEqual([f.site for f in doubtful], ["B"])
+        self.assertEqual(kept[0].details["verification"], "confirme")

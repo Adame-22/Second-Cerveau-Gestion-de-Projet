@@ -139,6 +139,72 @@ def http_get_json(url, timeout=15, retries=2):
     return None
 
 
+def _fetch_page(url, timeout=10):
+    """Return (status, body_text) for a URL, including 4xx/5xx bodies; None on network failure."""
+    import ssl
+    import urllib.error
+    ctx = ssl.create_default_context()
+    if CA_BUNDLE and os.path.exists(CA_BUNDLE):
+        ctx.load_verify_locations(CA_BUNDLE)
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+            return resp.status, resp.read(400_000).decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read(400_000).decode("utf-8", "replace")
+        except Exception:
+            body = ""
+        return e.code, body
+    except Exception:
+        return None
+
+
+def _control_verdict(real, control, username, control_name):
+    """Compare a found profile page with the page of a username that cannot exist."""
+    if real is None or control is None:
+        return "non verifie", "site injoignable pour la verification"
+    (rs, rb), (cs, cb) = real, control
+    if rs in (404, 410):
+        return "douteux", f"le profil n'existe pas (HTTP {rs})"
+    if rs >= 400 and cs >= 400:
+        return "non verifie", f"le site bloque la verification automatique (HTTP {rs}) : a confirmer manuellement"
+    if rs != cs:
+        return "confirme", f"HTTP {rs} pour le pseudo, {cs} pour un pseudo inexistant"
+    rn = rb.replace(username, "").replace(username.lower(), "")
+    cn = cb.replace(control_name, "").replace(control_name.lower(), "")
+    longest = max(len(rn), len(cn), 1)
+    if abs(len(rn) - len(cn)) / longest < 0.03:
+        return "douteux", "page identique pour un pseudo inexistant (le site repond 'trouve' a tout)"
+    return "confirme", "contenu different d'un profil inexistant"
+
+
+def verify_findings_with_control(findings, timeout=10, max_workers=8):
+    """Split username findings into (kept, doubtful) by comparing each page with a random-username control."""
+    import secrets
+    import string
+
+    def check(f):
+        if f.kind != "username" or not f.url or f.identifier not in f.url:
+            return f, "non verifie", ""
+        control_name = "".join(secrets.choice(string.ascii_lowercase) for _ in range(max(len(f.identifier), 8)))
+        control_url = f.url.replace(f.identifier, control_name)
+        verdict, reason = _control_verdict(_fetch_page(f.url, timeout), _fetch_page(control_url, timeout),
+                                           f.identifier, control_name)
+        return f, verdict, reason
+
+    kept, doubtful = [], []
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        for f, verdict, reason in ex.map(check, findings):
+            f.details["verification"] = verdict
+            if reason:
+                f.details["verification_detail"] = reason
+            (doubtful if verdict == "douteux" else kept).append(f)
+    return kept, doubtful
+
+
 # --- Existing tool parsers ---
 
 def parse_holehe_csv(csv_path, email):
@@ -1780,7 +1846,7 @@ def assess_social_engineering_risk(identity_card, breaches, companies, findings,
             attack_vectors.append("SIM swapping / vishing")
 
     for w in (whois_results or []):
-        if w.get("registrant_name") or w.get("registrant_organization"):
+        if w.get("registrant_name") or w.get("registrant_org"):
             exposed_info.append(("WHOIS : identite du proprietaire", "ELEVE"))
             attack_vectors.append("Contact via domaine personnel (pretexte technique)")
             break
@@ -1836,7 +1902,7 @@ def generate_action_priorities(breaches, findings, companies, whois_results, rep
         urgent.append("Verifier qu'aucun mot de passe fuite n'est reutilise sur d'autres comptes")
 
     for w in (whois_results or []):
-        if w.get("registrant_name") or w.get("registrant_organization"):
+        if w.get("registrant_name") or w.get("registrant_org"):
             important.append(f"Activer la protection WHOIS Privacy sur le domaine {w.get('domain', 'inconnu')}")
 
     if address_leaks:
@@ -2258,7 +2324,8 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
                    data_broker_urls=None, social_engineering_risk=None, action_priorities=None,
                    password_reuse=None, digital_footprint=None, executive_summary=None,
                    whois_privacy=None, exposure_heatmap=None,
-                   username_intel=None, email_intel=None, password_check_info=None):
+                   username_intel=None, email_intel=None, password_check_info=None,
+                   doubtful_findings=None):
     by_kind = {"username": [], "email": []}
     for finding in findings:
         by_kind[finding.kind].append(finding)
@@ -2513,10 +2580,13 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
     # --- Accounts found ---
     if by_kind["username"]:
         out += ["", S("Comptes trouves a partir des pseudos"), "",
-                "| Pseudo | Site | Lien | Vu par | Informations visibles |", "|---|---|---|---|---|"]
+                "| Pseudo | Site | Lien | Vu par | Verification | Informations visibles |", "|---|---|---|---|---|---|"]
+        verif_labels = {"confirme": "Confirme", "non verifie": "**A confirmer**"}
         for f in by_kind["username"]:
-            infos = ", ".join(f"{k}: {v}" for k, v in f.details.items()) or "-"
-            out.append(f"| {cell(f.identifier)} | {cell(f.site)} | {f.url} | {', '.join(f.sources)} | {cell(infos)} |")
+            infos = ", ".join(f"{k}: {v}" for k, v in f.details.items()
+                              if not k.startswith("verification")) or "-"
+            verif = verif_labels.get(f.details.get("verification"), "-")
+            out.append(f"| {cell(f.identifier)} | {cell(f.site)} | {f.url} | {', '.join(f.sources)} | {verif} | {cell(infos)} |")
 
     if by_kind["email"]:
         out += ["", S("Services ou l'email est inscrit"), "",
@@ -2961,6 +3031,17 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
             out.append(f"- {step}")
         out += ["", f"Verification manuelle : [{pci['check_url']}]({pci['check_url']})", ""]
 
+    # --- Doubtful findings ---
+    if doubtful_findings:
+        out += ["", "---", "", S("Resultats ecartes (faux positifs probables)"), ""]
+        out.append("Ces sites ont ete signales par les outils automatiques mais la verification de controle "
+                   "(comparaison avec un pseudo inexistant) montre qu'ils ne permettent pas de confirmer un compte. "
+                   "Ils ne sont pas comptes dans le score ni dans la synthese.")
+        out += ["", "| Site | Lien | Raison |", "|---|---|---|"]
+        for f in doubtful_findings:
+            out.append(f"| {cell(f.site)} | {f.url} | {cell(f.details.get('verification_detail', ''))} |")
+        out.append("")
+
     # --- WHOIS privacy ---
     if whois_privacy:
         out += ["", "---", "", S("Analyse de confidentialite WHOIS"), ""]
@@ -3103,7 +3184,7 @@ def parse_args(argv=None):
     parser.add_argument("--top-sites", type=int, default=500, help="Maigret : nombre de sites (defaut 500)")
     parser.add_argument("--skip", action="append", default=[],
                         choices=["holehe", "sherlock", "maigret", "breach", "company", "whois", "phone",
-                                 "reputation", "wayback", "dns", "paste", "social", "family", "crt", "github", "gravatar", "telegram"],
+                                 "reputation", "wayback", "dns", "paste", "social", "family", "crt", "github", "gravatar", "telegram", "verify"],
                         help="Module a ne pas lancer (repetable)")
     parser.add_argument("--timeout", type=int, default=10, help="Timeout par requete (defaut 10)")
     parser.add_argument("--tool-timeout", type=int, default=1800, help="Duree max par outil (defaut 1800)")
@@ -3268,8 +3349,8 @@ def main(argv=None):
 
         for f in whois_futures:
             w = f.result()
-            whois_results.append(w)
             if w:
+                whois_results.append(w)
                 log(f"  [INFO] WHOIS {w['domain']} : domaine personnel detecte")
 
         for f in reputation_futures:
@@ -3336,6 +3417,11 @@ def main(argv=None):
     # Phase 3: Build report
     log("[*] Phase 3 : generation du rapport...")
     findings = merge_findings(runs)
+    doubtful_findings = []
+    if "verify" not in opts.skip and any(f.kind == "username" for f in findings):
+        log(f"[*] Verification anti-faux-positifs de {sum(f.kind == 'username' for f in findings)} compte(s)...")
+        findings, doubtful_findings = verify_findings_with_control(findings, timeout=opts.timeout)
+        log(f"  [INFO] {len(findings)} conserve(s), {len(doubtful_findings)} ecarte(s) comme faux positifs probables")
     profile_details = extract_profile_details(runs)
     dorks = build_google_dorks(opts.nom, opts.email, opts.phone, opts.username)
 
@@ -3457,6 +3543,7 @@ def main(argv=None):
                 "username_intel": username_intel,
                 "email_intel": email_intel,
                 "password_check_info": password_check_info,
+                "comptes_ecartes": [asdict(f) for f in doubtful_findings],
             },
             indent=2, ensure_ascii=False,
         ),
@@ -3488,7 +3575,8 @@ def main(argv=None):
                           executive_summary=executive_summary,
                           whois_privacy=whois_privacy, exposure_heatmap=exposure_heatmap,
                           username_intel=username_intel, email_intel=email_intel,
-                          password_check_info=password_check_info),
+                          password_check_info=password_check_info,
+                          doubtful_findings=doubtful_findings),
             encoding="utf-8",
         )
         log(f"[*] Rapport : {report_file}")
