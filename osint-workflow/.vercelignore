@@ -1,0 +1,5 @@
+venv
+reports
+tests
+__pycache__
+config.json

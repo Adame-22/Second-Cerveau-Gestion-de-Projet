@@ -11,7 +11,7 @@ export PDF et CSV.
 cd osint-workflow
 python3 -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-cli.txt
 ```
 
 Sous Windows (PowerShell), puis utiliser `.\run.bat` a la place de `./run.sh` :
@@ -19,7 +19,7 @@ Sous Windows (PowerShell), puis utiliser `.\run.bat` a la place de `./run.sh` :
 ```powershell
 cd osint-workflow
 py -m venv venv
-venv\Scripts\pip install -r requirements.txt
+venv\Scripts\pip install -r requirements-cli.txt
 ```
 
 ## Usage

@@ -25,10 +25,15 @@ def load_config(path=None):
     p = Path(path) if path else CONFIG_PATH
     if p.exists():
         try:
-            return json.loads(p.read_text(encoding="utf-8"))
+            config = json.loads(p.read_text(encoding="utf-8"))
         except Exception:
-            pass
-    return {}
+            config = {}
+    else:
+        config = {}
+    for key in ("hibp_api_key", "intelx_api_key", "emailrep_api_key", "opencorporates_api_key"):
+        if os.environ.get(key.upper()):
+            config[key] = os.environ[key.upper()]
+    return config
 
 
 CONFIG = load_config()
@@ -93,8 +98,17 @@ class PhoneInfo:
 
 # --- Helpers ---
 
+_TOOL_ENTRYPOINTS = {"holehe": ("holehe.core", "main"), "sherlock": ("sherlock_project.sherlock", "main"),
+                     "maigret": ("maigret.maigret", "run"), "h8mail": ("h8mail.__main__", "main")}
+
+
 def tool(name):
-    return str(Path(sys.executable).parent / (name + (".exe" if os.name == "nt" else "")))
+    """Command prefix for a CLI tool: its script next to the interpreter, else the module run in-process."""
+    exe = Path(sys.executable).parent / (name + (".exe" if os.name == "nt" else ""))
+    if exe.exists() or name not in _TOOL_ENTRYPOINTS:
+        return [str(exe)]
+    module, func = _TOOL_ENTRYPOINTS[name]
+    return [sys.executable, "-c", f"import sys; from {module} import {func}; sys.exit({func}())"]
 
 
 def safe_name(value):
@@ -267,7 +281,7 @@ def run_holehe(email, raw_dir, opts):
     work_dir = raw_dir / f"holehe_{safe_name(email)}"
     work_dir.mkdir(parents=True)
     code, _ = execute(
-        [tool("holehe"), email, "--only-used", "--no-color", "--no-clear", "--csv"],
+        [*tool("holehe"), email, "--only-used", "--no-color", "--no-clear", "--csv"],
         work_dir / "sortie.log", work_dir, opts.tool_timeout,
     )
     csv_files = list(work_dir.glob("holehe_*_results.csv"))
@@ -284,7 +298,7 @@ def run_sherlock(username, raw_dir, opts):
     work_dir = raw_dir / f"sherlock_{safe_name(username)}"
     work_dir.mkdir(parents=True)
     code, output = execute(
-        [tool("sherlock"), username, "--print-found", "--no-color",
+        [*tool("sherlock"), username, "--print-found", "--no-color",
          "--timeout", str(opts.timeout), "--folderoutput", str(work_dir)],
         work_dir / "sortie.log", work_dir, opts.tool_timeout,
     )
@@ -300,7 +314,7 @@ def run_maigret(username, raw_dir, opts):
     work_dir.mkdir(parents=True)
     scope = ["--all-sites"] if opts.all_sites else ["--top-sites", str(opts.top_sites)]
     code, output = execute(
-        [tool("maigret"), username, "--no-color", "--no-progressbar", "--no-recursion",
+        [*tool("maigret"), username, "--no-color", "--no-progressbar", "--no-recursion",
          "--timeout", str(opts.timeout), "--json", "simple", "--html", "--folderoutput", str(work_dir)] + scope,
         work_dir / "sortie.log", work_dir, opts.tool_timeout,
     )
@@ -388,7 +402,7 @@ def _run_h8mail_fallback(email, work_dir):
     breaches = []
     try:
         code, output = execute(
-            [tool("h8mail"), "-t", email, "--loose", "-j", str(work_dir / "h8mail.json")],
+            [*tool("h8mail"), "-t", email, "--loose", "-j", str(work_dir / "h8mail.json")],
             work_dir / "h8mail_sortie.log", work_dir, 60,
         )
         json_path = work_dir / "h8mail.json"

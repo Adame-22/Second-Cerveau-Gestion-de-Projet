@@ -12,7 +12,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 if [ ! -d "$SCRIPT_DIR/venv" ]; then
     echo "[!] venv introuvable. Creation automatique..."
     python3 -m venv "$SCRIPT_DIR/venv"
-    "$SCRIPT_DIR/venv/bin/pip" install -r "$SCRIPT_DIR/requirements.txt" 2>/dev/null || true
+    "$SCRIPT_DIR/venv/bin/pip" install -r "$SCRIPT_DIR/requirements-cli.txt" 2>/dev/null || true
 fi
 
 source "$SCRIPT_DIR/venv/bin/activate"
