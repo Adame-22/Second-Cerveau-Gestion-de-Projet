@@ -1884,443 +1884,6 @@ def build_phone_osint_urls(phones=None):
     return urls
 
 
-def generate_executive_summary(findings, breaches, companies, phone_infos, whois_results,
-                                reputation_results=None, dns_results=None, breach_analysis=None,
-                                address_leaks=None, social_engineering_risk=None, risk_score=None, risk_level=None):
-    """Generate a structured executive summary from all analysis results."""
-    accounts_count = len(findings or [])
-    breaches_count = len(breaches or [])
-    pw_breaches = [b for b in (breaches or []) if "Passwords" in b.data_types]
-    password_breaches = len(pw_breaches)
-    companies_exposed = len(companies or [])
-    domains_exposed = len([w for w in (whois_results or []) if w and (w.get("registrant_name") or w.get("registrant_organization"))])
-    all_data_types = set()
-    for b in (breaches or []):
-        all_data_types.update(b.data_types)
-    data_categories_leaked = len(all_data_types)
-
-    exposure_metrics = {
-        "accounts_count": accounts_count,
-        "breaches_count": breaches_count,
-        "password_breaches": password_breaches,
-        "companies_exposed": companies_exposed,
-        "domains_exposed": domains_exposed,
-        "data_categories_leaked": data_categories_leaked,
-    }
-
-    _level = risk_level or "FAIBLE"
-    if _level == "CRITIQUE":
-        headline = "Exposition numerique CRITIQUE necessitant une remediation immediate"
-    elif _level == "ELEVE":
-        headline = "Exposition numerique ELEVEE — actions correctives recommandees sous 7 jours"
-    elif _level == "MOYEN":
-        headline = "Exposition numerique moderee — surveillance et ajustements conseilles"
-    else:
-        headline = "Exposition numerique faible — maintenir les bonnes pratiques"
-
-    key_findings = []
-    if password_breaches:
-        key_findings.append(f"{password_breaches} fuite(s) contenant des mots de passe — risque de compromission de comptes")
-    ba = breach_analysis or {}
-    if ba.get("financial_exposed"):
-        key_findings.append("Donnees financieres exposees dans au moins une fuite")
-    if ba.get("identity_exposed"):
-        key_findings.append("Documents d'identite exposes — risque d'usurpation")
-    if companies_exposed:
-        key_findings.append(f"{companies_exposed} entreprise(s) liee(s) trouvee(s) dans les registres publics")
-    if domains_exposed:
-        key_findings.append(f"{domains_exposed} domaine(s) avec informations proprietaire exposees (WHOIS)")
-    if address_leaks:
-        key_findings.append(f"Adresse physique detectee dans {len(address_leaks)} source(s)")
-    if accounts_count > 20:
-        key_findings.append(f"Surface d'attaque importante : {accounts_count} comptes en ligne identifies")
-    elif accounts_count > 0:
-        key_findings.append(f"{accounts_count} compte(s) en ligne identifies")
-    if breaches_count and not password_breaches:
-        key_findings.append(f"{breaches_count} fuite(s) de donnees sans mot de passe expose")
-    key_findings = key_findings[:5]
-
-    immediate_risks = []
-    if password_breaches:
-        immediate_risks.append("Mots de passe compromis pouvant donner acces aux comptes associes")
-    se = social_engineering_risk or {}
-    if se.get("attack_vectors"):
-        immediate_risks.append(f"Ingenierie sociale facilitee par {len(se['attack_vectors'])} vecteur(s) d'attaque identifies")
-    if ba.get("financial_exposed"):
-        immediate_risks.append("Fraude financiere possible avec les donnees bancaires exposees")
-    if address_leaks:
-        immediate_risks.append("Adresse physique exposee — risque de harcelement ou cambriolage")
-    if ba.get("identity_exposed"):
-        immediate_risks.append("Usurpation d'identite avec les documents exposes")
-    immediate_risks = immediate_risks[:3]
-
-    positive_findings = []
-    if not password_breaches:
-        positive_findings.append("Aucune fuite de mot de passe detectee")
-    if not breaches_count:
-        positive_findings.append("Aucune fuite de donnees connue")
-    dns_ok_spf = all(getattr(d, "spf", None) for d in (dns_results or []) if d) if dns_results else False
-    dns_ok_dmarc = all(getattr(d, "dmarc", None) for d in (dns_results or []) if d) if dns_results else False
-    if dns_results and dns_ok_spf and dns_ok_dmarc:
-        positive_findings.append("SPF et DMARC correctement configures sur les domaines email")
-    elif dns_results and dns_ok_spf:
-        positive_findings.append("SPF correctement configure sur les domaines email")
-    if not companies_exposed:
-        positive_findings.append("Aucune entreprise liee trouvee dans les registres publics")
-
-# --- Gravatar enrichment ---
-
-@dataclass
-class GravatarProfile:
-    email_hash: str
-    display_name: str = ""
-    about_me: str = ""
-    current_location: str = ""
-    profile_url: str = ""
-    urls: list = field(default_factory=list)
-    photos: list = field(default_factory=list)
-
-
-def run_gravatar_enrichment(email, raw_dir):
-    """Fetch Gravatar profile data from email hash (free, no API key)."""
-    work_dir = raw_dir / "gravatar"
-    work_dir.mkdir(parents=True, exist_ok=True)
-    email_hash = hashlib.md5(email.strip().lower().encode()).hexdigest()
-    url = f"https://www.gravatar.com/{email_hash}.json"
-    data = http_get_json(url, timeout=10, retries=1)
-    if not data or "entry" not in data:
-        return None
-    entries = data.get("entry", [])
-    if not entries:
-        return None
-    entry = entries[0]
-    profile = GravatarProfile(
-        email_hash=email_hash,
-        display_name=entry.get("displayName", "") or "",
-        about_me=entry.get("aboutMe", "") or "",
-        current_location=entry.get("currentLocation", "") or "",
-        profile_url=entry.get("profileUrl", "") or "",
-        urls=[u.get("value", "") for u in entry.get("urls", []) if u.get("value")],
-        photos=[p.get("value", "") for p in entry.get("photos", []) if p.get("value")],
-    )
-    (work_dir / f"gravatar_{safe_name(email)}.json").write_text(
-        json.dumps(asdict(profile), indent=2, ensure_ascii=False), encoding="utf-8"
-    )
-    return profile
-
-
-# --- Telegram username check ---
-
-def check_telegram_username(username, raw_dir):
-    """Check if a Telegram username exists by probing t.me page."""
-    work_dir = raw_dir / "telegram"
-    work_dir.mkdir(parents=True, exist_ok=True)
-    url = f"https://t.me/{urllib.parse.quote(username)}"
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            html = resp.read().decode("utf-8", errors="replace")
-    except Exception:
-        return None
-    exists = "tgme_page_photo" in html or "tgme_page_title" in html
-    display_name = ""
-    if exists:
-        m = re.search(r'class="tgme_page_title[^"]*"[^>]*>\s*<span[^>]*>([^<]+)</span>', html)
-        if m:
-            display_name = m.group(1).strip()
-    result = {"username": username, "exists": exists, "display_name": display_name, "url": url}
-    (work_dir / f"telegram_{safe_name(username)}.json").write_text(
-        json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
-    return result if exists else None
-
-
-# --- Relationship graph (Mermaid) ---
-
-DISPOSABLE_PROVIDERS = {
-    "guerrillamail", "tempmail", "throwaway", "mailinator", "yopmail", "10minutemail",
-    "trashmail", "sharklasers", "guerrilla", "grr.la", "dispostable", "fakeinbox",
-    "maildrop", "getairmail", "temp-mail", "emailondeck", "mohmal", "burnermail",
-    "discard.email", "nada.email", "getnada", "mytemp.email", "tempr.email",
-}
-
-PERSONAL_PROVIDERS = {"gmail", "yahoo", "outlook", "hotmail", "live", "aol", "icloud",
-                      "protonmail", "proton.me", "pm.me", "zoho", "mail.com", "gmx",
-                      "tutanota", "yandex", "laposte.net", "orange.fr", "free.fr",
-                      "sfr.fr", "wanadoo.fr", "bbox.fr", "numericable.fr"}
-
-
-def analyze_email_patterns(emails=None, nom=None, whois_results=None):
-    """Analyze email addresses for intelligence: provider, type, corporate pattern, disposable."""
-    profiles = []
-    for email in (emails or []):
-        local, _, domain = email.partition("@")
-        if not domain:
-            continue
-        domain_lower = domain.lower()
-        base_domain = domain_lower.rsplit(".", 1)[0] if "." in domain_lower else domain_lower
-
-        is_disposable = any(d in domain_lower for d in DISPOSABLE_PROVIDERS)
-        is_personal = any(p in domain_lower for p in PERSONAL_PROVIDERS)
-        email_type = "jetable" if is_disposable else ("personnel" if is_personal else "professionnel")
-
-        corporate_match = False
-        if nom and email_type == "professionnel":
-            parts = nom.lower().split()
-            if len(parts) >= 2:
-                first, last = parts[0], parts[-1]
-                local_l = local.lower()
-                patterns = [
-                    f"{first}.{last}", f"{first[0]}.{last}", f"{first}{last}",
-                    f"{first[0]}{last}", f"{last}.{first}", f"{last}{first[0]}",
-                    f"{first}_{last}", f"{first}-{last}",
-                ]
-                corporate_match = any(p == local_l for p in patterns)
-
-        whois_match = False
-        if whois_results:
-            for w in whois_results:
-                if w and hasattr(w, "domain") and domain_lower in str(getattr(w, "domain", "")).lower():
-                    whois_match = True
-                    break
-
-        profiles.append({
-            "email": email,
-            "domain": domain_lower,
-            "provider": base_domain,
-            "type": email_type,
-            "corporate_match": corporate_match,
-            "disposable": is_disposable,
-            "whois_match": whois_match,
-        })
-    return {"email_profiles": profiles}
-
-
-def generate_username_intelligence(findings, usernames=None):
-    """Analyze usernames for patterns, reuse across platforms, and behavioral insights."""
-    reuse_map = {}
-    for f in (findings or []):
-        if f.kind == "username":
-            reuse_map.setdefault(f.identifier, []).append(f.site)
-    for u in (usernames or []):
-        if u not in reuse_map:
-            reuse_map[u] = []
-
-    patterns = []
-    insights = []
-    year_re = re.compile(r'(\d{2,4})$')
-    location_hints = {
-        "paris", "lyon", "marseille", "toulouse", "nice", "nantes", "bordeaux",
-        "lille", "strasbourg", "rennes", "nyc", "london", "berlin", "tokyo",
-    }
-
-    for username in reuse_map:
-        u_lower = username.lower()
-        m = year_re.search(u_lower)
-        if m:
-            year_str = m.group(1)
-            if len(year_str) == 2:
-                y = int(year_str)
-                full_year = 1900 + y if y > 50 else 2000 + y
-                if 1960 <= full_year <= 2010:
-                    patterns.append({"username": username, "pattern": "year_hint", "value": str(full_year)})
-                    insights.append(f"Le pseudo '{username}' pourrait indiquer une annee de naissance ({full_year})")
-            elif len(year_str) == 4:
-                y = int(year_str)
-                if 1960 <= y <= 2010:
-                    patterns.append({"username": username, "pattern": "year_hint", "value": year_str})
-                    insights.append(f"Le pseudo '{username}' contient l'annee {year_str}")
-
-        for loc in location_hints:
-            if loc in u_lower.replace("_", "").replace("-", "").replace(".", ""):
-                patterns.append({"username": username, "pattern": "location_hint", "value": loc})
-                insights.append(f"Le pseudo '{username}' pourrait indiquer la ville de {loc.title()}")
-                break
-
-    multi_site = {u: sites for u, sites in reuse_map.items() if len(sites) >= 2}
-    for u, sites in sorted(multi_site.items(), key=lambda x: -len(x[1])):
-        insights.append(f"Le pseudo '{u}' est reutilise sur {len(sites)} plateformes : {', '.join(sites[:5])}")
-
-    return {"patterns": patterns, "reuse_map": {u: s for u, s in reuse_map.items()}, "insights": insights}
-
-
-def build_password_check_section():
-    """Build a report section explaining k-anonymity password checking via HIBP Passwords API."""
-    return {
-        "api_url": "https://api.pwnedpasswords.com/range/{5_premiers_caracteres_SHA1}",
-        "check_url": "https://haveibeenpwned.com/Passwords",
-        "explanation": (
-            "L'API HIBP Passwords utilise le modele k-anonymite : "
-            "seuls les 5 premiers caracteres du hash SHA-1 du mot de passe sont envoyes. "
-            "Le serveur retourne tous les suffixes correspondants. "
-            "Le mot de passe complet n'est jamais transmis."
-        ),
-        "steps": [
-            "1. Hasher le mot de passe en SHA-1",
-            "2. Envoyer les 5 premiers caracteres a l'API",
-            "3. Chercher le suffixe dans la reponse",
-            "4. Si present, le mot de passe a ete compromis",
-        ],
-    }
-
-
-def detect_whois_privacy(whois_results):
-    """Detect whether WHOIS records use privacy protection or expose personal data."""
-    privacy_keywords = {"privacy", "redacted", "proxy", "whoisguard", "domains by proxy",
-                        "contact privacy", "withheld", "gdpr", "data protected", "not disclosed",
-                        "identity protection", "anonymized"}
-    results = []
-    for w in (whois_results or []):
-        if not w:
-            continue
-        domain = w.get("domain", "") if isinstance(w, dict) else getattr(w, "domain", "")
-        name = w.get("registrant_name", "") if isinstance(w, dict) else getattr(w, "registrant_name", "")
-        org = w.get("registrant_organization", "") if isinstance(w, dict) else getattr(w, "registrant_organization", "")
-        address = ""
-        if isinstance(w, dict):
-            address = w.get("registrant_address", "")
-        else:
-            address = getattr(w, "registrant_address", "") or ""
-        all_text = f"{name} {org} {address}".lower()
-        has_privacy = any(kw in all_text for kw in privacy_keywords)
-        exposed_fields = []
-        if name and not has_privacy:
-            exposed_fields.append("nom")
-        if address and not has_privacy:
-            exposed_fields.append("adresse")
-        if org and not has_privacy:
-            exposed_fields.append("organisation")
-        results.append({
-            "domain": domain,
-            "privacy_enabled": has_privacy,
-            "exposed_fields": exposed_fields,
-            "risk": "FAIBLE" if has_privacy else ("ELEVE" if exposed_fields else "MOYEN"),
-        })
-    return results
-
-
-def generate_exposure_heatmap(findings, breaches, companies, whois_results,
-                               dns_results, address_leaks, phone_infos):
-    """Generate a heatmap of exposure scores across different vectors."""
-    vectors = {
-        "Comptes en ligne": min(100, len(findings or []) * 3),
-        "Fuites de donnees": min(100, len(breaches or []) * 15),
-        "Mots de passe": min(100, sum(1 for b in (breaches or []) if "Passwords" in b.data_types) * 25),
-        "Entreprises": min(100, len(companies or []) * 20),
-        "Domaines WHOIS": min(100, sum(1 for w in (whois_results or []) if w) * 30),
-        "DNS mal configure": min(100, sum(1 for d in (dns_results or [])
-                                          if hasattr(d, "spf") and not d.spf) * 40),
-        "Adresses exposees": min(100, len(address_leaks or []) * 25),
-        "Telephone": min(100, len(phone_infos or []) * 20),
-    }
-    overall = int(sum(vectors.values()) / max(len(vectors), 1))
-    return {"vectors": vectors, "overall": overall}
-
-
-def generate_executive_summary(findings, breaches, companies, phone_infos, whois_results,
-                                reputation_results=None, dns_results=None, breach_analysis=None,
-                                address_leaks=None, social_engineering_risk=None, risk_score=None, risk_level=None):
-    """Generate a structured executive summary from all analysis results."""
-    accounts_count = len(findings or [])
-    breaches_count = len(breaches or [])
-    pw_breaches = [b for b in (breaches or []) if "Passwords" in b.data_types]
-    password_breaches = len(pw_breaches)
-    companies_exposed = len(companies or [])
-    domains_exposed = len([w for w in (whois_results or []) if w and
-                           ((w.get("registrant_name") if isinstance(w, dict) else getattr(w, "registrant_name", "")) or
-                            (w.get("registrant_organization") if isinstance(w, dict) else getattr(w, "registrant_organization", "")))])
-    all_data_types = set()
-    for b in (breaches or []):
-        all_data_types.update(b.data_types)
-    data_categories_leaked = len(all_data_types)
-
-    exposure_metrics = {
-        "accounts_count": accounts_count,
-        "breaches_count": breaches_count,
-        "password_breaches": password_breaches,
-        "companies_exposed": companies_exposed,
-        "domains_exposed": domains_exposed,
-        "data_categories_leaked": data_categories_leaked,
-    }
-
-    _level = risk_level or "FAIBLE"
-    if _level == "CRITIQUE":
-        headline = "Exposition numerique CRITIQUE necessitant une remediation immediate"
-    elif _level == "ELEVE":
-        headline = "Exposition numerique ELEVEE — actions correctives recommandees sous 7 jours"
-    elif _level == "MOYEN":
-        headline = "Exposition numerique moderee — surveillance et ajustements conseilles"
-    else:
-        headline = "Exposition numerique faible — maintenir les bonnes pratiques"
-
-    key_findings = []
-    if password_breaches:
-        key_findings.append(f"{password_breaches} fuite(s) contenant des mots de passe — risque de compromission de comptes")
-    ba = breach_analysis or {}
-    if ba.get("financial_exposed"):
-        key_findings.append("Donnees financieres exposees dans au moins une fuite")
-    if ba.get("identity_exposed"):
-        key_findings.append("Documents d'identite exposes — risque d'usurpation")
-    if companies_exposed:
-        key_findings.append(f"{companies_exposed} entreprise(s) liee(s) trouvee(s) dans les registres publics")
-    if domains_exposed:
-        key_findings.append(f"{domains_exposed} domaine(s) avec informations proprietaire exposees (WHOIS)")
-    if address_leaks:
-        key_findings.append(f"Adresse physique detectee dans {len(address_leaks)} source(s)")
-    if accounts_count > 20:
-        key_findings.append(f"Surface d'attaque importante : {accounts_count} comptes en ligne identifies")
-    elif accounts_count > 0:
-        key_findings.append(f"{accounts_count} compte(s) en ligne identifies")
-    key_findings = key_findings[:5]
-
-    immediate_risks = []
-    if password_breaches:
-        immediate_risks.append("Mots de passe compromis pouvant donner acces aux comptes associes")
-    se = social_engineering_risk or {}
-    if se.get("attack_vectors"):
-        immediate_risks.append(f"Ingenierie sociale facilitee par {len(se['attack_vectors'])} vecteur(s) d'attaque identifies")
-    if ba.get("financial_exposed"):
-        immediate_risks.append("Fraude financiere possible avec les donnees bancaires exposees")
-    if address_leaks:
-        immediate_risks.append("Adresse physique exposee — risque de harcelement ou cambriolage")
-    immediate_risks = immediate_risks[:3]
-
-    positive_findings = []
-    if not password_breaches:
-        positive_findings.append("Aucune fuite de mot de passe detectee")
-    if not breaches_count:
-        positive_findings.append("Aucune fuite de donnees connue")
-    dns_ok_spf = all(getattr(d, "spf", None) for d in (dns_results or []) if d) if dns_results else False
-    dns_ok_dmarc = all(getattr(d, "dmarc", None) for d in (dns_results or []) if d) if dns_results else False
-    if dns_results and dns_ok_spf and dns_ok_dmarc:
-        positive_findings.append("SPF et DMARC correctement configures sur les domaines email")
-    if not companies_exposed:
-        positive_findings.append("Aucune entreprise liee trouvee dans les registres publics")
-    if accounts_count <= 5 and accounts_count > 0:
-        positive_findings.append("Surface d'attaque limitee avec peu de comptes en ligne")
-    if not address_leaks:
-        positive_findings.append("Aucune adresse physique detectee dans les fuites")
-
-    return {
-        "headline": headline,
-        "key_findings": key_findings,
-        "exposure_metrics": exposure_metrics,
-        "immediate_risks": immediate_risks,
-        "positive_findings": positive_findings,
-    }
-    if accounts_count <= 5 and accounts_count > 0:
-        positive_findings.append("Surface d'attaque limitee avec peu de comptes en ligne")
-    if not address_leaks:
-        positive_findings.append("Aucune adresse physique detectee dans les fuites")
-
-    return {
-        "headline": headline,
-        "key_findings": key_findings,
-        "exposure_metrics": exposure_metrics,
-        "immediate_risks": immediate_risks,
-        "positive_findings": positive_findings,
-    }
-
 
 def detect_password_reuse(breaches):
     """Detect password reuse risk across breaches."""
@@ -2405,12 +1968,156 @@ def compute_digital_footprint(findings, breaches=None, companies=None, whois_res
     return {"overall": overall, "total_accounts": total, "category_details": details}
 
 
-DISPOSABLE_PROVIDERS = {
-    "guerrillamail", "tempmail", "throwaway", "mailinator", "yopmail", "10minutemail",
-    "trashmail", "sharklasers", "guerrilla", "grr.la", "dispostable", "fakeinbox",
-    "maildrop", "getairmail", "temp-mail", "emailondeck", "mohmal", "burnermail",
-    "discard.email", "nada.email", "getnada", "mytemp.email", "tempr.email",
-}
+def generate_executive_summary(findings, breaches, companies, phone_infos, whois_results,
+                                reputation_results=None, dns_results=None, breach_analysis=None,
+                                address_leaks=None, social_engineering_risk=None, risk_score=None, risk_level=None):
+    """Generate a structured executive summary dict for the report header."""
+    ba = breach_analysis or {}
+    se = social_engineering_risk or {}
+    rs = risk_score if risk_score is not None else 0
+    rl = risk_level or "FAIBLE"
+
+    # Headline with risk level included
+    headlines = {
+        "CRITIQUE": "Exposition numerique CRITIQUE necessitant des actions immediates",
+        "ELEVE": "Exposition numerique ELEVE avec risques significatifs identifies",
+        "MOYEN": "Exposition numerique MOYEN avec quelques points d\'attention",
+        "FAIBLE": "Exposition numerique FAIBLE, bonne maitrise de l\'empreinte",
+    }
+    headline = headlines.get(rl, f"Exposition numerique {rl}")
+
+    # Count password breaches
+    pw_breaches = sum(1 for b in breaches if "Passwords" in (b.data_types or []))
+
+    # Key findings (top 5)
+    key_findings = []
+    if findings:
+        key_findings.append(f"{len(findings)} compte(s) en ligne identifie(s)")
+    if breaches:
+        key_findings.append(f"{len(breaches)} fuite(s) de donnees detectee(s)")
+    if ba.get("password_exposed"):
+        key_findings.append("Mots de passe exposes dans des fuites")
+    if ba.get("financial_exposed"):
+        key_findings.append("Donnees financieres exposees dans des fuites")
+    if companies:
+        key_findings.append(f"{len(companies)} entreprise(s) associee(s) trouvee(s)")
+    if address_leaks:
+        key_findings.append(f"{len(address_leaks)} fuite(s) d\'adresse physique detectee(s)")
+    if phone_infos:
+        key_findings.append(f"{len(phone_infos)} numero(s) de telephone analyse(s)")
+    if ba.get("identity_exposed"):
+        key_findings.append("Donnees d\'identite exposees dans des fuites")
+    key_findings = key_findings[:5]
+
+    # Exposure metrics
+    exposure_metrics = {
+        "accounts_count": len(findings),
+        "breaches_count": len(breaches),
+        "companies_count": len(companies),
+        "password_breaches": pw_breaches,
+        "score_risque": rs,
+    }
+
+    # Immediate risks (top 3)
+    immediate_risks = []
+    if ba.get("password_exposed"):
+        immediate_risks.append("Changement immediat de tous les mots de passe compromis")
+    if ba.get("financial_exposed"):
+        immediate_risks.append("Surveillance des comptes financiers et alertes bancaires")
+    if se.get("risk_level") in ("ELEVE", "CRITIQUE"):
+        immediate_risks.append("Risque eleve d\'ingenierie sociale - sensibiliser l\'entourage")
+    if address_leaks:
+        immediate_risks.append("Adresses physiques exposees - verifier la securite du domicile")
+    immediate_risks = immediate_risks[:3]
+
+    # Positive findings
+    positive = []
+    if not ba.get("password_exposed") and pw_breaches == 0:
+        positive.append("Aucune fuite de mot de passe detectee")
+    if not breaches:
+        positive.append("Aucune fuite de donnees connue")
+    if not ba.get("financial_exposed"):
+        positive.append("Pas de donnees financieres detectees dans les fuites")
+    if not companies:
+        positive.append("Aucune entreprise liee trouvee dans les registres publics")
+    if not address_leaks:
+        positive.append("Aucune fuite d\'adresse physique detectee")
+    if len(findings) <= 5:
+        positive.append("Surface d\'attaque limitee avec peu de comptes en ligne")
+
+    return {
+        "headline": headline,
+        "key_findings": key_findings,
+        "exposure_metrics": exposure_metrics,
+        "immediate_risks": immediate_risks,
+        "positive_findings": positive,
+    }
+
+
+def detect_whois_privacy(whois_results):
+    """Detect whether WHOIS records use privacy protection or expose personal data."""
+    if not whois_results:
+        return []
+    privacy_keywords = {"privacy", "proxy", "redacted", "withheld", "protect",
+                        "whoisguard", "domains by proxy", "contact privacy",
+                        "perfect privacy", "identity protect", "privacyprotect"}
+    results = []
+    for wr in whois_results:
+        if not wr or not isinstance(wr, dict):
+            continue
+        domain = wr.get("domain", "?")
+        raw = json.dumps(wr).lower()
+        privacy_enabled = any(kw in raw for kw in privacy_keywords)
+        exposed_fields = []
+        personal_keys = {"registrant_name": "Nom", "registrant_email": "Email",
+                         "registrant_phone": "Telephone", "registrant_address": "Adresse",
+                         "admin_email": "Email admin", "tech_email": "Email technique"}
+        for key, label in personal_keys.items():
+            val = wr.get(key, "")
+            if val and not any(kw in str(val).lower() for kw in privacy_keywords):
+                exposed_fields.append(label)
+        risk = "FAIBLE"
+        if exposed_fields and not privacy_enabled:
+            risk = "CRITIQUE" if len(exposed_fields) >= 3 else "ELEVE"
+        elif exposed_fields:
+            risk = "MOYEN"
+        results.append({"domain": domain, "privacy_enabled": privacy_enabled,
+                        "exposed_fields": exposed_fields, "risk": risk})
+    return results
+
+
+def generate_exposure_heatmap(findings, breaches, companies, whois_results,
+                               dns_results, address_leaks, phone_infos):
+    """Generate a heatmap of exposure scores across different vectors."""
+    vectors = {}
+    # Social media exposure
+    social_sites = {"facebook", "instagram", "twitter", "tiktok", "snapchat", "linkedin",
+                    "reddit", "pinterest", "youtube", "tumblr", "threads"}
+    social_count = sum(1 for f in findings if any(s in f.site.lower() for s in social_sites))
+    vectors["Reseaux sociaux"] = min(100, social_count * 20)
+    # Data breaches
+    vectors["Fuites de donnees"] = min(100, len(breaches) * 15)
+    # Corporate exposure
+    vectors["Exposition professionnelle"] = min(100, len(companies) * 25)
+    # Domain/WHOIS
+    whois_count = sum(1 for w in whois_results if w and isinstance(w, dict))
+    vectors["Domaines & WHOIS"] = min(100, whois_count * 30)
+    # DNS footprint
+    vectors["Infrastructure DNS"] = min(100, len(dns_results) * 20)
+    # Address/location leaks
+    addr_count = len(address_leaks) if address_leaks else 0
+    vectors["Localisation & adresses"] = min(100, addr_count * 35)
+    # Phone exposure
+    vectors["Telephonie"] = min(100, len(phone_infos) * 30)
+    # Online accounts
+    vectors["Comptes en ligne"] = min(100, len(findings) * 5)
+    overall = round(sum(vectors.values()) / max(len(vectors), 1))
+    return {"vectors": vectors, "overall": overall}
+
+
+DISPOSABLE_PROVIDERS = {"guerrillamail", "tempmail", "throwaway", "mailinator", "yopmail",
+                       "sharklasers", "guerrillamailblock", "grr.la", "tempail", "dispostable",
+                       "maildrop", "10minutemail", "trashmail", "fakeinbox", "temp-mail"}
 
 PERSONAL_PROVIDERS = {"gmail", "yahoo", "outlook", "hotmail", "live", "aol", "icloud",
                       "protonmail", "proton.me", "pm.me", "zoho", "mail.com", "gmx",
@@ -3633,6 +3340,10 @@ def main(argv=None):
         findings, breaches=breaches, companies=companies, whois_results=whois_results,
         dns_results=dns_results, github_profiles=github_profiles,
         gravatar_profiles=gravatar_profiles, telegram_results=telegram_results)
+    whois_privacy = detect_whois_privacy(whois_results)
+    exposure_heatmap = generate_exposure_heatmap(
+        findings, breaches, companies, whois_results,
+        dns_results, address_leaks, phone_infos)
     executive_summary = generate_executive_summary(
         findings, breaches, companies, phone_infos, whois_results,
         reputation_results=reputation_results, dns_results=dns_results,
@@ -3695,6 +3406,8 @@ def main(argv=None):
                 "action_priorities": action_priorities,
                 "password_reuse": password_reuse,
                 "digital_footprint": digital_footprint,
+                "whois_privacy": whois_privacy,
+                "exposure_heatmap": exposure_heatmap,
                 "executive_summary": executive_summary,
                 "username_intel": username_intel,
                 "email_intel": email_intel,
@@ -3727,6 +3440,8 @@ def main(argv=None):
                           data_broker_urls=data_broker_urls, social_engineering_risk=social_engineering_risk,
                           action_priorities=action_priorities,
                           password_reuse=password_reuse, digital_footprint=digital_footprint,
+                          executive_summary=executive_summary,
+                          whois_privacy=whois_privacy, exposure_heatmap=exposure_heatmap,
                           username_intel=username_intel, email_intel=email_intel,
                           password_check_info=password_check_info),
             encoding="utf-8",
