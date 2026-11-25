@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Audit d'exposition OSINT</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1a202c; --muted: #5a6475; --border: #dde2ea;
+    --accent: #2b5fb4; --accent-text: #ffffff; --danger: #b42318; --ok: #1f7a4d; --code: #eef2f7;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0f1218; --panel: #171b23; --text: #e6e9ef; --muted: #9aa3b2; --border: #2a3140;
+            --accent: #6d9be8; --accent-text: #0f1218; --danger: #f97066; --ok: #4fc68d; --code: #222937; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 980px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 1.5rem; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 24px; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 20px; }
+  label { display: block; font-weight: 600; margin: 14px 0 6px; }
+  .hint { font-weight: 400; color: var(--muted); font-size: .85rem; }
+  input[type=text], input[type=password], textarea {
+    width: 100%; padding: 9px 11px; border: 1px solid var(--border); border-radius: 7px;
+    background: var(--bg); color: var(--text); font: inherit; }
+  textarea { min-height: 64px; resize: vertical; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
+  @media (max-width: 640px) { .grid { grid-template-columns: 1fr; } }
+  .check { display: flex; gap: 10px; align-items: flex-start; font-weight: 400; margin-top: 16px; }
+  .check input { margin-top: 4px; }
+  button { background: var(--accent); color: var(--accent-text); border: 0; border-radius: 7px;
+           padding: 10px 18px; font: inherit; font-weight: 600; cursor: pointer; }
+  button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--border); }
+  button:disabled { opacity: .55; cursor: wait; }
+  .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+  .status { margin-top: 14px; color: var(--muted); }
+  .error { color: var(--danger); }
+  #report { overflow-wrap: anywhere; }
+  #report table { border-collapse: collapse; width: 100%; display: block; overflow-x: auto; font-size: .9rem; margin: 10px 0; }
+  #report th, #report td { border: 1px solid var(--border); padding: 6px 8px; text-align: left; vertical-align: top; }
+  #report th { background: var(--code); }
+  #report h1 { font-size: 1.4rem; } #report h2 { font-size: 1.15rem; border-bottom: 1px solid var(--border); padding-bottom: 4px; margin-top: 28px; }
+  #report code, #report pre { background: var(--code); border-radius: 4px; }
+  #report code { padding: 1px 4px; } #report pre { padding: 10px; overflow-x: auto; }
+  #report blockquote { margin: 10px 0; padding: 8px 12px; border-left: 3px solid var(--accent); background: var(--code); }
+  #report a { color: var(--accent); }
+  .hidden { display: none; }
+  @media print {
+    body { background: #fff; color: #000; } .no-print { display: none !important; }
+    .panel { border: 0; padding: 0; } #report a { color: #000; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <div class="no-print">
+    <h1>Audit d'exposition OSINT</h1>
+    <p class="sub">Uniquement avec l'accord écrit de la personne concernée. Aucune donnée n'est conservée sur le serveur : le rapport n'existe que dans ce navigateur.</p>
+
+    <form id="form" class="panel" autocomplete="off">
+      <label for="key">Clé d'accès</label>
+      <input id="key" type="password" required>
+
+      <div class="grid">
+        <div>
+          <label for="mandat">Référence du mandat</label>
+          <input id="mandat" type="text" required placeholder="ex. MANDAT-2026-014">
+        </div>
+        <div>
+          <label for="nom">Nom complet <span class="hint">(optionnel)</span></label>
+          <input id="nom" type="text" placeholder="Prénom Nom">
+        </div>
+        <div>
+          <label for="emails">Emails <span class="hint">(un par ligne, 5 max)</span></label>
+          <textarea id="emails"></textarea>
+        </div>
+        <div>
+          <label for="usernames">Pseudos <span class="hint">(un par ligne, 5 max)</span></label>
+          <textarea id="usernames"></textarea>
+        </div>
+        <div>
+          <label for="phones">Téléphones <span class="hint">(format +33…)</span></label>
+          <textarea id="phones"></textarea>
+        </div>
+      </div>
+
+      <label class="check"><input id="deep" type="checkbox">
+        <span>Analyse approfondie (Maigret, 500 sites de plus) <span class="hint">: peut dépasser la limite de 5 minutes et échouer</span></span></label>
+      <label class="check"><input id="consent" type="checkbox" required>
+        <span>La personne concernée a signé un accord écrit pour cet audit, référencé ci-dessus.</span></label>
+
+      <div class="actions"><button id="go" type="submit">Lancer l'analyse</button></div>
+      <div id="status" class="status" role="status"></div>
+    </form>
+  </div>
+
+  <section id="result" class="panel hidden">
+    <div class="actions no-print">
+      <button class="secondary" id="dl-md" type="button">Rapport (.md)</button>
+      <button class="secondary" id="dl-json" type="button">Données (.json)</button>
+      <button class="secondary" id="dl-xlsx" type="button">Excel (.xlsx)</button>
+      <button class="secondary" id="print" type="button">PDF / Imprimer</button>
+      <button class="secondary" id="clear" type="button">Effacer le rapport</button>
+    </div>
+    <article id="report"></article>
+  </section>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  let last = null;
+
+  try { $("key").value = localStorage.getItem("osint_key") || ""; } catch (e) {}
+
+  const lines = (id) => $(id).value.split(/[\n,]/).map(s => s.trim()).filter(Boolean);
+
+  function download(name, content, type) {
+    const blob = content instanceof Blob ? content : new Blob([content], { type });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+
+  const baseName = () => "audit_" + ($("mandat").value.trim().replace(/[^\w-]+/g, "_") || "osint");
+
+  async function render(md) {
+    const html = DOMPurify.sanitize(marked.parse(md), { ADD_ATTR: ["target"] });
+    const report = $("report");
+    report.innerHTML = html;
+    report.querySelectorAll("a[href]").forEach(a => { a.target = "_blank"; a.rel = "noopener noreferrer"; });
+    const blocks = report.querySelectorAll("pre code.language-mermaid");
+    if (blocks.length && window.mermaid) {
+      const dark = matchMedia("(prefers-color-scheme: dark)").matches;
+      mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: dark ? "dark" : "default" });
+      for (const [i, code] of [...blocks].entries()) {
+        try {
+          const { svg } = await mermaid.render("graph" + i, code.textContent);
+          const div = document.createElement("div");
+          div.innerHTML = DOMPurify.sanitize(svg, { USE_PROFILES: { svg: true, svgFilters: true } });
+          code.parentElement.replaceWith(div);
+        } catch (e) { /* keep the source text if the graph cannot be drawn */ }
+      }
+    }
+  }
+
+  $("form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const key = $("key").value.trim();
+    try { localStorage.setItem("osint_key", key); } catch (e) {}
+    const payload = {
+      mandat: $("mandat").value.trim(), nom: $("nom").value.trim(),
+      emails: lines("emails"), usernames: lines("usernames"), phones: lines("phones"),
+      consent: $("consent").checked, deep: $("deep").checked,
+    };
+    const status = $("status");
+    status.className = "status";
+    $("go").disabled = true;
+    const t0 = Date.now();
+    const tick = setInterval(() => {
+      const s = Math.round((Date.now() - t0) / 1000);
+      status.textContent = `Analyse en cours… ${Math.floor(s / 60)} min ${String(s % 60).padStart(2, "0")} s (compter 2 à 5 minutes, ne fermez pas la page)`;
+    }, 1000);
+    try {
+      const res = await fetch("/api/scan", {
+        method: "POST", headers: { "Content-Type": "application/json", "X-Access-Key": key },
+        body: JSON.stringify(payload),
+      });
+      let body = {};
+      try { body = await res.json(); } catch (e) {}
+      if (!res.ok) {
+        const msg = res.status === 504 ? "Délai de 5 minutes dépassé : relancez sans l'analyse approfondie ou avec moins d'identifiants."
+                  : (body.error || `Erreur ${res.status}`);
+        throw new Error(msg);
+      }
+      last = body;
+      await render(body.report);
+      $("result").classList.remove("hidden");
+      $("dl-xlsx").classList.toggle("hidden", !body.xlsx_base64);
+      status.textContent = "Analyse terminée.";
+      $("result").scrollIntoView({ behavior: "smooth" });
+    } catch (e) {
+      status.className = "status error";
+      status.textContent = e.message || "Erreur réseau.";
+    } finally {
+      clearInterval(tick);
+      $("go").disabled = false;
+    }
+  });
+
+  $("dl-md").onclick = () => last && download(baseName() + ".md", last.report, "text/markdown");
+  $("dl-json").onclick = () => last && download(baseName() + ".json", JSON.stringify(last.data, null, 2), "application/json");
+  $("dl-xlsx").onclick = () => {
+    if (!last || !last.xlsx_base64) return;
+    const bytes = Uint8Array.from(atob(last.xlsx_base64), c => c.charCodeAt(0));
+    download(baseName() + ".xlsx", new Blob([bytes], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
+  };
+  $("print").onclick = () => window.print();
+  $("clear").onclick = () => { last = null; $("report").innerHTML = ""; $("result").classList.add("hidden"); $("status").textContent = ""; };
+})();
+</script>
+</body>
+</html>

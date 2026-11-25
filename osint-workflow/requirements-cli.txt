@@ -1,0 +1,5 @@
+-r requirements.txt
+maigret
+h8mail
+weasyprint
+pikepdf

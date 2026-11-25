@@ -1,0 +1,14 @@
+{
+    "_comment": "Copier ce fichier en config.json et remplir les cles souhaitees. Aucune n'est obligatoire.",
+    "hibp_api_key": "",
+    "intelx_api_key": "",
+    "emailrep_api_key": "",
+    "opencorporates_api_key": "",
+    "export_pdf": true,
+    "pdf_password": "",
+    "default_top_sites": 500,
+    "default_timeout": 10,
+    "default_tool_timeout": 1800,
+    "max_workers": 8,
+    "language": "fr"
+}
