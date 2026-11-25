@@ -2069,11 +2069,13 @@ def detect_whois_privacy(whois_results):
         raw = json.dumps(wr).lower()
         privacy_enabled = any(kw in raw for kw in privacy_keywords)
         exposed_fields = []
-        personal_keys = {"registrant_name": "Nom", "registrant_email": "Email",
-                         "registrant_phone": "Telephone", "registrant_address": "Adresse",
-                         "admin_email": "Email admin", "tech_email": "Email technique"}
+        personal_keys = {"registrant_name": "Nom", "registrant_org": "Organisation",
+                         "registrant_address": "Adresse", "registrant_city": "Ville",
+                         "emails_in_whois": "Email"}
         for key, label in personal_keys.items():
-            val = wr.get(key, "")
+            val = wr.get(key)
+            if isinstance(val, list):
+                val = " ".join(str(v) for v in val)
             if val and not any(kw in str(val).lower() for kw in privacy_keywords):
                 exposed_fields.append(label)
         risk = "FAIBLE"
@@ -2255,7 +2257,8 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
                    gravatar_profiles=None, telegram_results=None, relationship_graph=None,
                    data_broker_urls=None, social_engineering_risk=None, action_priorities=None,
                    password_reuse=None, digital_footprint=None, executive_summary=None,
-                   whois_privacy=None, exposure_heatmap=None):
+                   whois_privacy=None, exposure_heatmap=None,
+                   username_intel=None, email_intel=None, password_check_info=None):
     by_kind = {"username": [], "email": []}
     for finding in findings:
         by_kind[finding.kind].append(finding)
@@ -2620,7 +2623,7 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
 
     # --- Exposure matrix ---
     if findings or breaches:
-        out += ["", "---", "", "## Matrice d'exposition", ""]
+        out += ["", "---", "", S("Matrice d'exposition"), ""]
         out.append("| Source | Identifiant | Donnees exposees | Risque |")
         out.append("|---|---|---|---|")
         for b in breaches:
@@ -2850,7 +2853,7 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
 
     # --- Data broker exposure ---
     if data_broker_urls:
-        out += ["", "---", "", "## Exposition courtiers de donnees", ""]
+        out += ["", "---", "", S("Exposition courtiers de donnees"), ""]
         out.append("Verifier la presence du sujet sur ces plateformes et demander le retrait si necessaire :")
         out.append("")
         out.append("| Courtier | Region | Lien de recherche | Demande de retrait |")
@@ -2862,7 +2865,7 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
     # --- Social engineering risk ---
     if social_engineering_risk:
         se = social_engineering_risk
-        out += ["", "---", "", f"## Risque d'ingenierie sociale : {se['risk_level']}", ""]
+        out += ["", "---", "", S(f"Risque d'ingenierie sociale : {se['risk_level']}"), ""]
         if se["exposed_info"]:
             out.append("### Informations exposees")
             out.append("")
@@ -2893,7 +2896,7 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
     # --- Password reuse ---
     if password_reuse and password_reuse.get("at_risk_emails"):
         pr = password_reuse
-        out += ["", "---", "", f"## Risque de reutilisation de mots de passe : {pr['reuse_risk_level']}", ""]
+        out += ["", "---", "", S(f"Risque de reutilisation de mots de passe : {pr['reuse_risk_level']}"), ""]
         out.append(f"**{pr['total_password_breaches']}** fuite(s) contenant des mots de passe detectee(s).")
         out.append("")
         out.append("| Email | Nb fuites avec mot de passe | Fuites |")
@@ -2909,7 +2912,7 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
     # --- Digital footprint ---
     if digital_footprint:
         df = digital_footprint
-        out += ["", "---", "", f"## Empreinte numerique : {df['overall']}/100", ""]
+        out += ["", "---", "", S(f"Empreinte numerique : {df['overall']}/100"), ""]
         out.append(f"**{df['total_accounts']}** comptes identifies au total.")
         out.append("")
         out.append("| Categorie | Score | Comptes | Exemples |")
@@ -2918,6 +2921,45 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
             examples = ", ".join(cat["examples"][:3]) if cat["examples"] else "-"
             out.append(f"| {cell(cat['category'])} | {cat['score']}/100 | {cat['count']} | {cell(examples)} |")
         out.append("")
+
+    # --- Username intelligence ---
+    ui = username_intel or {}
+    if ui.get("patterns") or ui.get("insights") or ui.get("reuse_map"):
+        out += ["", "---", "", S("Analyse des pseudos"), ""]
+        for ins in ui.get("insights", []):
+            out.append(f"- {ins}")
+        if ui.get("patterns"):
+            labels = {"year_hint": "Annee (naissance probable)", "location_hint": "Indice de localisation"}
+            out += ["", "| Pseudo | Indice | Valeur |", "|---|---|---|"]
+            for pt in ui["patterns"]:
+                out.append(f"| {cell(pt['username'])} | {labels.get(pt['pattern'], pt['pattern'])} | {cell(pt['value'])} |")
+        reuse = {u: sites for u, sites in ui.get("reuse_map", {}).items() if len(sites) > 1}
+        if reuse:
+            out += ["", "**Reutilisation du meme pseudo :**", ""]
+            for u, sites in reuse.items():
+                out.append(f"- `{u}` : {len(sites)} plateformes ({', '.join(sorted(sites)[:10])})")
+        out.append("")
+
+    # --- Email intelligence ---
+    profiles = (email_intel or {}).get("email_profiles", [])
+    if profiles:
+        out += ["", "---", "", S("Analyse des adresses email"), ""]
+        out += ["| Email | Fournisseur | Type | Format nominatif | Jetable | Domaine WHOIS |", "|---|---|---|---|---|---|"]
+        for ep in profiles:
+            out.append(f"| {cell(ep['email'])} | {cell(ep['provider'])} | {ep['type']} | "
+                       f"{'Oui' if ep['corporate_match'] else 'Non'} | {'**Oui**' if ep['disposable'] else 'Non'} | "
+                       f"{'Oui' if ep['whois_match'] else 'Non'} |")
+        out.append("")
+
+    # --- Password check guide ---
+    if password_check_info and breaches:
+        pci = password_check_info
+        out += ["", "---", "", S("Verifier ses mots de passe (sans les divulguer)"), ""]
+        out.append(pci["explanation"])
+        out.append("")
+        for step in pci.get("steps", []):
+            out.append(f"- {step}")
+        out += ["", f"Verification manuelle : [{pci['check_url']}]({pci['check_url']})", ""]
 
     # --- WHOIS privacy ---
     if whois_privacy:
@@ -2951,7 +2993,7 @@ def render_report(opts, runs, findings, started, breaches, companies, phone_info
 
     # --- Action plan ---
     _rs = risk_score if risk_score is not None else 0
-    out += ["", "---", "", "## Plan d'action", ""]
+    out += ["", "---", "", S("Plan d'action"), ""]
 
     if _rs >= 70:
         out += ["**URGENCE : score de risque CRITIQUE ({}/100). Actions immediates requises.**".format(_rs), ""]
@@ -3340,6 +3382,9 @@ def main(argv=None):
         findings, breaches=breaches, companies=companies, whois_results=whois_results,
         dns_results=dns_results, github_profiles=github_profiles,
         gravatar_profiles=gravatar_profiles, telegram_results=telegram_results)
+    username_intel = generate_username_intelligence(findings, usernames=opts.username)
+    email_intel = analyze_email_patterns(emails=opts.email, nom=opts.nom, whois_results=whois_results)
+    password_check_info = build_password_check_section()
     whois_privacy = detect_whois_privacy(whois_results)
     exposure_heatmap = generate_exposure_heatmap(
         findings, breaches, companies, whois_results,

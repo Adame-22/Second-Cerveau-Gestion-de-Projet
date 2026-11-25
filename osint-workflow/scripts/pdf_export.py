@@ -2,6 +2,7 @@
 """Convertit un RAPPORT.md en PDF professionnel avec mise en page et style."""
 
 import argparse
+import html
 import re
 import sys
 from pathlib import Path
@@ -108,6 +109,23 @@ code {
 .priority-important { background: #fffaf0; border-left: 3px solid #dd6b20; padding: 4px 8px; margin: 4px 0; }
 .priority-recommended { background: #f0fff4; border-left: 3px solid #38a169; padding: 4px 8px; margin: 4px 0; }
 
+pre {
+    background: #f7fafc;
+    border: 1px solid #e2e8f0;
+    padding: 8px;
+    font-size: 8pt;
+    white-space: pre-wrap;
+}
+
+.mermaid-placeholder {
+    background: #f0f5ff;
+    border: 1px dashed #2b6cb0;
+    padding: 8px;
+    font-family: monospace;
+    font-size: 8pt;
+    white-space: pre-wrap;
+}
+
 blockquote {
     border-left: 3px solid #2b6cb0;
     padding: 8px 12px;
@@ -162,6 +180,22 @@ def md_to_html(md_text):
                 in_ul = False
             html_parts.append(f"<h3>{_inline(stripped[4:])}</h3>")
             i += 1
+            continue
+
+        # Fenced code block (mermaid rendered as text placeholder: weasyprint runs no JS)
+        if stripped.startswith("```"):
+            if in_ul:
+                html_parts.append("</ul>")
+                in_ul = False
+            lang = stripped[3:].strip()
+            code_lines = []
+            i += 1
+            while i < len(lines) and not lines[i].strip().startswith("```"):
+                code_lines.append(html.escape(lines[i]))
+                i += 1
+            i += 1
+            css = ' class="mermaid-placeholder"' if lang == "mermaid" else ""
+            html_parts.append(f"<pre{css}>" + "\n".join(code_lines) + "</pre>")
             continue
 
         # Horizontal rule

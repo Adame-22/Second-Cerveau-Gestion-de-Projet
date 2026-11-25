@@ -111,7 +111,12 @@ Chaque audit cree `reports/<date>_<mandat>/` (jamais versionne) :
 35. **Risque d'ingenierie sociale** : vecteurs d'attaque, questions de securite compromises, recommandations
 36. **Reutilisation de mots de passe** : emails exposes dans plusieurs fuites avec mots de passe
 37. **Empreinte numerique** : score par categorie (reseaux sociaux, professionnel, e-commerce, gaming, etc.)
-38. **Plan d'action dynamique** : recommandations priorisees (URGENT/IMPORTANT/RECOMMANDE) basees sur les resultats reels
+38. **Analyse des pseudos** : annees de naissance et localisations deduites, reutilisation d'un meme pseudo entre plateformes
+39. **Analyse des adresses email** : fournisseur, perso/pro/jetable, format nominatif, lien avec un domaine WHOIS
+40. **Verification des mots de passe** : methode k-anonymite HIBP (le mot de passe n'est jamais transmis)
+41. **Confidentialite WHOIS** : domaines sans protection vie privee et champs personnels exposes
+42. **Carte thermique d'exposition** : 8 vecteurs notes sur 100 (reseaux sociaux, fuites, pro, domaines, DNS, adresses, telephonie, comptes)
+43. **Plan d'action dynamique** : recommandations priorisees (URGENT/IMPORTANT/RECOMMANDE) basees sur les resultats reels
 
 ## Modules d'investigation
 
@@ -150,7 +155,7 @@ Chaque audit cree `reports/<date>_<mandat>/` (jamais versionne) :
 | Password reuse | Fuites | Detection de reutilisation de mots de passe entre fuites |
 | Digital footprint | Toutes sources | Score d'empreinte numerique par categorie (social, pro, gaming, etc.) |
 | Dynamic action plan | Toutes sources | Plan d'action priorise (URGENT/IMPORTANT/RECOMMANDE) |
-| XLSX export | resultats.json | Export Excel professionnel avec mise en forme (6 onglets) |
+| XLSX export | resultats.json | Export Excel professionnel avec mise en forme (jusqu'a 13 onglets : synthese, comptes, fuites, entreprises, telephones, risque, empreinte, mots de passe, ingenierie sociale, courtiers, carte d'exposition, WHOIS, plan d'action) |
 | Relationship graph | Toutes sources | Diagramme Mermaid des liens identite-comptes-entreprises |
 
 Les scans de la phase 1 (comptes) et de la phase 2 (analyse approfondie) tournent en parallele.
@@ -187,3 +192,5 @@ comme pistes a confirmer et ne sont pas recherches automatiquement.
 ```bash
 python -m unittest discover -s tests
 ```
+
+183 tests, dont un test de bout en bout hors ligne (tous les modules reseau desactives) qui verifie que le rapport, le JSON et les exports se generent sans erreur.

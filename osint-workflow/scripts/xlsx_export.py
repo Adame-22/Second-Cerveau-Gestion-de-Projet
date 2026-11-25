@@ -138,6 +138,70 @@ def export_xlsx(json_path, xlsx_path=None):
     _auto_width(ws6)
     _add_borders(ws6)
 
+    def _sheet(title, headers, rows, fills=None):
+        sh = wb.create_sheet(title)
+        sh.append(headers)
+        _style_header(sh, len(headers))
+        for idx, row in enumerate(rows):
+            sh.append([" - ".join(map(str, v)) if isinstance(v, (list, tuple)) else v for v in row])
+            fill = fills[idx] if fills else None
+            if fill:
+                for col in range(1, len(headers) + 1):
+                    sh.cell(row=sh.max_row, column=col).fill = fill
+        _auto_width(sh)
+        _add_borders(sh)
+
+    df = data.get("digital_footprint") or {}
+    if df.get("category_details"):
+        _sheet("Empreinte", ["Categorie", "Score", "Nombre", "Exemples"],
+               [[d["category"], d["score"], d["count"], ", ".join(d.get("examples", []))]
+                for d in df["category_details"]])
+
+    pr = data.get("password_reuse") or {}
+    if pr.get("at_risk_emails"):
+        rows = [[e["email"], e["breach_count"], ", ".join(e["breaches"])] for e in pr["at_risk_emails"]]
+        fills = [CRITICAL_FILL if e["breach_count"] >= 2 else WARN_FILL for e in pr["at_risk_emails"]]
+        _sheet("Mots de passe", ["Email", "Fuites avec mot de passe", "Fuites"], rows, fills)
+
+    se = data.get("social_engineering_risk") or {}
+    if se:
+        rows = [["Niveau de risque", se.get("risk_level", "")]]
+        rows += [["Info exposee", i] for i in se.get("exposed_info", [])]
+        rows += [["Vecteur d'attaque", v] for v in se.get("attack_vectors", [])]
+        rows += [["Question de securite a risque", q] for q in se.get("security_questions_at_risk", [])]
+        rows += [["Recommandation", r] for r in se.get("recommendations", [])]
+        _sheet("Ingenierie sociale", ["Type", "Detail"], rows)
+
+    brokers = data.get("data_broker_urls") or []
+    if brokers:
+        _sheet("Courtiers donnees", ["Courtier", "Region", "Recherche", "Suppression"],
+               [[b.get("broker", ""), b.get("region", ""), b.get("search_url", ""), b.get("removal_url", "")]
+                for b in brokers])
+
+    eh = data.get("exposure_heatmap") or {}
+    if eh.get("vectors"):
+        rows = sorted(eh["vectors"].items(), key=lambda x: -x[1])
+        fills = [CRITICAL_FILL if v >= 70 else WARN_FILL if v >= 40 else None for _, v in rows]
+        _sheet("Carte exposition", ["Vecteur", "Score /100"], [list(r) for r in rows] + [["GLOBAL", eh.get("overall", 0)]],
+               fills + [None])
+
+    wp = data.get("whois_privacy") or []
+    if wp:
+        _sheet("WHOIS vie privee", ["Domaine", "Protection", "Champs exposes", "Risque"],
+               [[w["domain"], "Oui" if w["privacy_enabled"] else "Non", ", ".join(w["exposed_fields"]), w["risk"]]
+                for w in wp],
+               [CRITICAL_FILL if w["risk"] in ("CRITIQUE", "ELEVE") else None for w in wp])
+
+    ap = data.get("action_priorities") or {}
+    if any(ap.get(k) for k in ("urgent", "important", "recommended")):
+        rows, fills = [], []
+        for key, label, fill in (("urgent", "URGENT", CRITICAL_FILL), ("important", "IMPORTANT", WARN_FILL),
+                                 ("recommended", "RECOMMANDE", None)):
+            for a in ap.get(key, []):
+                rows.append([label, a])
+                fills.append(fill)
+        _sheet("Plan action", ["Priorite", "Action"], rows, fills)
+
     wb.save(xlsx_path)
     print(f"[*] Excel genere : {xlsx_path}")
     return xlsx_path

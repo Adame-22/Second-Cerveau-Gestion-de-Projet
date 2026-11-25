@@ -1417,3 +1417,94 @@ class TestExecutiveSummary(unittest.TestCase):
         self.assertIn("Aucune fuite de donnees connue", result["positive_findings"])
         self.assertIn("Aucune entreprise liee trouvee dans les registres publics", result["positive_findings"])
         self.assertIn("Surface d'attaque limitee avec peu de comptes en ligne", result["positive_findings"])
+
+
+class TestWhoisPrivacy(unittest.TestCase):
+    def test_empty(self):
+        self.assertEqual(runner.detect_whois_privacy([]), [])
+        self.assertEqual(runner.detect_whois_privacy([None]), [])
+
+    def test_exposed_registrant(self):
+        wr = {"domain": "dupont.fr", "registrar": "OVH", "registrant_name": "Jean Dupont",
+              "registrant_address": "1 rue X", "registrant_city": "Lyon", "emails_in_whois": ["j@dupont.fr"]}
+        res = runner.detect_whois_privacy([wr])[0]
+        self.assertFalse(res["privacy_enabled"])
+        self.assertIn("Nom", res["exposed_fields"])
+        self.assertIn("Email", res["exposed_fields"])
+        self.assertEqual(res["risk"], "CRITIQUE")
+
+    def test_privacy_protected(self):
+        wr = {"domain": "x.com", "registrant_name": "REDACTED FOR PRIVACY", "emails_in_whois": []}
+        res = runner.detect_whois_privacy([wr])[0]
+        self.assertTrue(res["privacy_enabled"])
+        self.assertEqual(res["exposed_fields"], [])
+        self.assertEqual(res["risk"], "FAIBLE")
+
+
+class TestExposureHeatmap(unittest.TestCase):
+    def test_empty(self):
+        res = runner.generate_exposure_heatmap([], [], [], [], [], [], [])
+        self.assertEqual(res["overall"], 0)
+        self.assertEqual(len(res["vectors"]), 8)
+
+    def test_scores_capped(self):
+        findings = [runner.Finding("u", "username", "Facebook", sources=["sherlock"]) for _ in range(30)]
+        breaches = [runner.BreachInfo("a@b.com", f"L{i}") for i in range(20)]
+        res = runner.generate_exposure_heatmap(findings, breaches, [], [], [], [], [])
+        self.assertEqual(res["vectors"]["Reseaux sociaux"], 100)
+        self.assertEqual(res["vectors"]["Fuites de donnees"], 100)
+        self.assertTrue(all(0 <= v <= 100 for v in res["vectors"].values()))
+
+
+class TestExports(unittest.TestCase):
+    def test_xlsx_new_sheets(self):
+        try:
+            import openpyxl
+        except ImportError:
+            self.skipTest("openpyxl absent")
+        import xlsx_export
+        tmp = Path(tempfile.mkdtemp())
+        data = {
+            "comptes": [], "fuites": [], "entreprises": [], "telephones_info": [],
+            "digital_footprint": {"category_details": [{"category": "Gaming", "score": 10, "count": 1, "examples": ["Steam"]}]},
+            "password_reuse": {"at_risk_emails": [{"email": "a@b.com", "breach_count": 2, "breaches": ["A", "B"]}]},
+            "social_engineering_risk": {"risk_level": "ELEVE", "attack_vectors": ["phishing"]},
+            "data_broker_urls": [{"broker": "X", "region": "FR", "search_url": "u", "removal_url": "r"}],
+            "exposure_heatmap": {"vectors": {"Telephonie": 30}, "overall": 30},
+            "whois_privacy": [{"domain": "d.fr", "privacy_enabled": False, "exposed_fields": ["Nom"], "risk": "ELEVE"}],
+            "action_priorities": {"urgent": ["Changer mdp"], "important": [], "recommended": ["2FA"]},
+        }
+        jp = tmp / "resultats.json"
+        jp.write_text(json.dumps(data), encoding="utf-8")
+        out = xlsx_export.export_xlsx(jp)
+        names = openpyxl.load_workbook(out).sheetnames
+        for sheet in ("Empreinte", "Mots de passe", "Ingenierie sociale", "Courtiers donnees",
+                      "Carte exposition", "WHOIS vie privee", "Plan action"):
+            self.assertIn(sheet, names)
+
+    def test_pdf_code_block_escaped(self):
+        import pdf_export
+        out = pdf_export.md_to_html("# T\n\n```mermaid\ngraph LR\n  A-->B<x>\n```\n\ntexte")
+        self.assertIn('class="mermaid-placeholder"', out)
+        self.assertIn("A--&gt;B&lt;x&gt;", out)
+        self.assertIn("<p>texte</p>", out)
+
+
+class TestEndToEndOffline(unittest.TestCase):
+    def test_full_run_all_network_skipped(self):
+        out = Path(tempfile.mkdtemp())
+        skips = ["holehe", "sherlock", "maigret", "breach", "company", "whois", "reputation",
+                 "wayback", "dns", "paste", "crt", "github", "gravatar", "telegram"]
+        argv = ["--mandat", "E2E-1", "--nom", "Jean Test", "--email", "jean@example.org",
+                "--username", "jeantest92", "--phone", "+33612345678", "--output-dir", str(out), "--quiet"]
+        for m in skips:
+            argv += ["--skip", m]
+        runner.main(argv)
+        report = next(out.rglob("RAPPORT.md")).read_text(encoding="utf-8")
+        data = json.loads(next(out.rglob("resultats.json")).read_text(encoding="utf-8"))
+        self.assertIn("Synthese executive", report)
+        self.assertIn("Analyse des pseudos", report)
+        self.assertIn("Carte thermique", report)
+        for key in ("executive_summary", "exposure_heatmap", "whois_privacy", "username_intel", "email_intel"):
+            self.assertIn(key, data)
+        self.assertNotIn("\n## Plan d'action", report)
