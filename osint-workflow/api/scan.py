@@ -60,7 +60,7 @@ def run_scan(payload):
             try:
                 runner.main(argv)
             except SystemExit as exc:
-                if exc.code not in (0, None):
+                if exc.code == 2:
                     raise ValueError("Identifiants invalides : verifiez le format des emails, pseudos et telephones.")
         report = next(out_dir.rglob("RAPPORT.md"), None)
         if report is None:

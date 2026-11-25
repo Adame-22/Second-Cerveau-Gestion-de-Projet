@@ -108,7 +108,9 @@ def tool(name):
     if exe.exists() or name not in _TOOL_ENTRYPOINTS:
         return [str(exe)]
     module, func = _TOOL_ENTRYPOINTS[name]
-    return [sys.executable, "-c", f"import sys; from {module} import {func}; sys.exit({func}())"]
+    paths = json.dumps([p for p in sys.path if p])
+    return [sys.executable, "-c",
+            f"import sys; sys.path[:0] = {paths}; from {module} import {func}; sys.exit({func}())"]
 
 
 def safe_name(value):
